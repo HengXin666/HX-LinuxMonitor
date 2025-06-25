@@ -1,3 +1,17 @@
+# clang
+.cache/
+
+# cmake
+build/
+
+# makefile
+.HX-LinuxMonitor.*
+*.cmd
+*.mod.c
+*.ko
+modules.*
+Module.*
+
 # Prerequisites
 *.d
 
