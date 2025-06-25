@@ -14,15 +14,15 @@ hx:
 	make -j $(nrpoc) -C $(LINUX_KERNAL_PATH) M=$(CURRENT_PATH) modules
 
 i:  install
-	dmesg
+	@dmesg | tail -n 5
 
 install:
 # 安装模块
 	@sudo insmod $(CURRENT_PATH)/$(MODULE)
 
 un: uninstall
-	dmesg
-
+	@dmesg | tail -n 5
+ 
 uninstall:
 # 卸载模块
 	@sudo rmmod $(CURRENT_PATH)/$(MODULE)
@@ -35,7 +35,8 @@ rm: clean
 clean:
 	make -C $(LINUX_KERNAL_PATH) M=$(CURRENT_PATH) clean
 
+d: 	debug
 debug:
-	dmesg
+	@dmesg | tail -n 5
 
 .PHONY:all install clean hx
