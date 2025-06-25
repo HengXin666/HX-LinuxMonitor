@@ -31,6 +31,7 @@ sudo rmmod main
 */
 // #include <linux/lsm_hook_defs.h>
 #include <linux/init.h>
+// #include <linux/>
 #include <linux/module.h>  
   
 static int __init construct(void) {  
