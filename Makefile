@@ -3,7 +3,7 @@ OBJ=$(TARGET).o
 MODULE=$(TARGET).ko
 obj-m+=$(OBJ)
 
-EXTRA_CFLAGS+=-g++ -O2
+EXTRA_CFLAGS+=-g -O2 # -x c++ # 左边这样写是编译c++
 CURRENT_PATH:=$(shell pwd)
 LINUX_KERNAL:=$(shell uname -r)
 LINUX_KERNAL_PATH:=/lib/modules/$(LINUX_KERNAL)/build

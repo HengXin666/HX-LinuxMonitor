@@ -6,6 +6,16 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
  
+/*
+make -j  -C /lib/modules/5.10.0-8-generic/build M=/home/kylin/hx/code/HX-LinuxMonitor modules
+make[1]: 进入目录“/usr/src/linux-headers-5.10.0-8-generic”
+  CC [M]  /home/kylin/hx/code/HX-LinuxMonitor/HX-LinuxMonitor.o
+  MODPOST /home/kylin/hx/code/HX-LinuxMonitor/Module.symvers
+ERROR: modpost: "security_hook_heads" [/home/kylin/hx/code/HX-LinuxMonitor/HX-LinuxMonitor.ko] undefined!
+ERROR: modpost: "security_add_hooks" [/home/kylin/hx/code/HX-LinuxMonitor/HX-LinuxMonitor.ko] undefined!
+make[2]: *** [scripts/Makefile.modpost:124：/home/kylin/hx/code/HX-LinuxMonitor/Module.symvers] 错误 1
+*/
+
 // 文件打开时的钩子函数
 static int my_file_open(struct file* file)
 {
@@ -32,11 +42,14 @@ static struct security_hook_list my_hooks[] __lsm_ro_after_init = {
     LSM_HOOK_INIT(inode_permission, my_inode_permission),
 };
  
+static struct lsm_id lsmId;
+
 // 初始化 LSM 模块
 static int __init lsm_init(void)
 {
     pr_info("Initializing My LSM Module for File Operations\n");
-    security_add_hooks(my_hooks, ARRAY_SIZE(my_hooks), "my_file_lsm");
+    lsmId.lsm = "my_file_lsm";
+    security_add_hooks(my_hooks, ARRAY_SIZE(my_hooks), &lsmId);
     return 0;
 }
  
@@ -50,5 +63,5 @@ module_init(lsm_init);
 module_exit(lsm_exit);
  
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Heng_Xin");
-MODULE_DESCRIPTION("A custom LSM module to intercept file operations");
+// MODULE_AUTHOR("Heng_Xin");
+// MODULE_DESCRIPTION("A custom LSM module to intercept file operations");
