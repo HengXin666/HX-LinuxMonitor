@@ -1,5 +1,6 @@
 // https://rivers.chaitin.cn/blog/cqj64sh0lnedo7thptp0
 // 开发时候需要安装本机内核版本 开发包
+```c
 // sudo apt install linux-headers-$(uname -r)
 
 /*
@@ -29,9 +30,7 @@ sudo rmmod main
 再次查看内核日志:
 [30251.733364] First kernel module has been removed
 */
-// #include <linux/lsm_hook_defs.h>
 #include <linux/init.h>
-// #include <linux/>
 #include <linux/module.h>  
   
 static int __init construct(void) {  
@@ -47,3 +46,4 @@ module_init(construct);
 module_exit(destruct);  
   
 MODULE_LICENSE("GPL");
+```
