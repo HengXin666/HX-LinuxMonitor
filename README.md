@@ -194,3 +194,9 @@ MODULE_LICENSE("GPL");
 // MODULE_AUTHOR("Heng_Xin");
 // MODULE_DESCRIPTION("A custom LSM module to intercept file operations");
 ```
+
+- https://blog.csdn.net/qq_42931917/article/details/108887284 [hook 系统读写]
+
+- https://github.com/noahyzhang/file_io_hook 文件 IO 监控
+
+- https://blog.csdn.net/jinking01/article/details/126728429 Linux利用hook技术实现文件监控和网络过滤
