@@ -1,75 +1,54 @@
-#include <linux/init.h>   // included for __init and __exit macros
-#include <linux/kernel.h> // included for KERN_INFO
-#include <linux/module.h> // included for all kernel modules
-#include <linux/netdevice.h>
-#include <linux/lsm_hook_defs.h>
-#include <linux/netfilter.h>
-#include <linux/netfilter_ipv4.h>
-#include <linux/vmalloc.h>
-
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("A Simple Hello Packet Module");
-
-enum {
-  NF_IP_PRE_ROUTING,
-  NF_IP_LOCAL_IN,
-  NF_IP_FORWARD,
-  NF_IP_LOCAL_OUT,
-  NF_IP_POST_ROUTING,
-  NF_IP_NUMHOOKS
+#include <linux/init.h>
+#include <linux/lsm_hooks.h>
+#include <linux/security.h>
+#include <linux/fs.h>
+#include <linux/dcache.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+ 
+// 文件打开时的钩子函数
+static int my_file_open(struct file* file)
+{
+    // 打印文件名
+    if (file && file->f_path.dentry && file->f_path.dentry->d_name.name) {
+        pr_info("File opened: %s\n", file->f_path.dentry->d_name.name);
+    }
+    return 0; // 返回 0 表示允许操作继续
+}
+ 
+// 权限检查时的钩子函数
+static int my_inode_permission(struct inode *inode, int mask)
+{
+    // 打印 inode 编号和权限掩码
+    if (inode) {
+        pr_info("Permission check for inode: %lu, mask: %d\n", inode->i_ino, mask);
+    }
+    return 0; // 返回 0 表示允许访问
+}
+ 
+// 定义 LSM 钩子列表
+static struct security_hook_list my_hooks[] __lsm_ro_after_init = {
+    LSM_HOOK_INIT(file_open, my_file_open),
+    LSM_HOOK_INIT(inode_permission, my_inode_permission),
 };
-
-static struct nf_hook_ops in_nfho;  // net filter hook option struct
-static struct nf_hook_ops out_nfho; // net filter hook option struct
-
-static void dump_addr(unsigned char *iphdr) {
-  int i;
-  for (i = 0; i < 4; i++) {
-    printk("%d.", *(iphdr + 12 + i));
-  }
-  printk(" -> ");
-  for (i = 0; i < 4; i++) {
-    printk("%d.", *(iphdr + 16 + i));
-  }
-  printk("\n");
+ 
+// 初始化 LSM 模块
+static int __init lsm_init(void)
+{
+    pr_info("Initializing My LSM Module for File Operations\n");
+    security_add_hooks(my_hooks, ARRAY_SIZE(my_hooks), "my_file_lsm");
+    return 0;
 }
-
-unsigned int my_hook(void *priv, struct sk_buff *skb,
-                     const struct nf_hook_state *state) {
-  printk("Hello packet! ");
-  // printk("from %s to %s\n", in->name, out->name);
-  unsigned char *iphdr = skb_network_header(skb);
-  if (iphdr) {
-    dump_addr(iphdr);
-  }
-  return NF_ACCEPT;
-  // return NF_DROP;//会导致上不了网
+ 
+// 卸载 LSM 模块
+static void __exit lsm_exit(void)
+{
+    pr_info("Exiting My LSM Module for File Operations\n");
 }
-
-static int __init init_func(void) {
-  // NF_IP_PRE_ROUTING hook
-  in_nfho.hook = my_hook;
-  in_nfho.hooknum = NF_IP_LOCAL_IN;
-  in_nfho.pf = PF_INET;
-  in_nfho.priority = NF_IP_PRI_FIRST;
-
-  nf_register_net_hook(&init_net, &in_nfho);
-
-  // NF_IP_LOCAL_OUT hook
-  out_nfho.hook = my_hook;
-  out_nfho.hooknum = NF_IP_LOCAL_OUT;
-  out_nfho.pf = PF_INET;
-  out_nfho.priority = NF_IP_PRI_FIRST;
-
-  nf_register_net_hook(&init_net, &out_nfho);
-  return 0;
-}
-
-static void __exit exit_func(void) {
-  nf_unregister_net_hook(&init_net, &in_nfho);
-  nf_unregister_net_hook(&init_net, &out_nfho);
-  printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
-}
-
-module_init(init_func);
-module_exit(exit_func);
+ 
+module_init(lsm_init);
+module_exit(lsm_exit);
+ 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Heng_Xin");
+MODULE_DESCRIPTION("A custom LSM module to intercept file operations");
