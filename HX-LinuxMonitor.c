@@ -8,15 +8,59 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
+#include <linux/inet.h>
+#include <linux/slab.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
 
-struct Data
-{
-    const char *ip;
-    int port;
+// 可存储 ipv4/ipv6 - 端口 的数据结构
+struct hx_addrinfo {
+    __be32 addr;
+    uint16_t port; // 如果是 0, 则表示任意端口
 };
+
+struct hx_addrinfo* make_hx_addrinfo(const char* src, uint16_t port) {
+    struct hx_addrinfo* res = (struct hx_addrinfo*)kmalloc(sizeof(struct hx_addrinfo), GFP_KERNEL);
+    res->addr = in_aton(src);
+    res->port = port;
+    return res;
+}
+
+struct hx_addr_node {
+    struct hx_addrinfo* data;
+    struct hx_addr_node* next;
+};
+
+static struct hx_addr_node hx_addr_list;
+
+// 头插法
+void hx_addr_list_push_front(struct hx_addrinfo* data) {
+    struct hx_addr_node* node = (struct hx_addr_node*)kmalloc(sizeof(struct hx_addr_node), GFP_KERNEL);
+    node->next = hx_addr_list.next;
+    hx_addr_list.next = node;
+    node->data = data;
+}
+
+// 清空链表
+void hx_addr_list_clear(void) {
+    struct hx_addr_node* node = hx_addr_list.next;
+    while (node) {
+        kfree(node->data);
+        struct hx_addr_node* nx = node->next;
+        kfree(node);
+        node = nx;
+    }
+}
+
+// 该ip:端口 是否在 黑名单 中
+int hx_addr_list_contains(__be32 addr, uint16_t port) {
+    struct hx_addr_node* node = hx_addr_list.next;
+    for (; node; node = node->next)
+        if (node->data->addr == addr && (node->data->port == port || !node->data->port))
+            return 1;
+    return 0;
+}
 
 static struct nf_hook_ops out_nfho; // net filter hook option struct
 
@@ -40,6 +84,10 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                     NIPQUAD(nh->daddr), th->dest);  // 目标ip - 端口
                     
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
+                if (hx_addr_list_contains(nh->daddr, th->dest)) {
+                    printk("[Hook TCP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), th->dest);
+                    return NF_DROP;
+                }
                 break;
             }
             case IPPROTO_UDP: {
@@ -47,10 +95,15 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                 printk("[UDP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
                     NIPQUAD(nh->saddr), uh->source, // 源ip - 端口
                     NIPQUAD(nh->daddr), uh->dest);  // 目标ip - 端口
+                // 如果目标 ip:端口 是黑名单内容, 则禁止
+                if (hx_addr_list_contains(nh->daddr, uh->dest)) {
+                    printk("[Hook UDP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), uh->dest);
+                    return NF_DROP;
+                }
                 break;
             }
             case IPPROTO_IPV6: {
-                printk("[IPv6]"); // @todo
+                printk("[IPv6]"); // @todo https://wenku.csdn.net/answer/6noibmz8jq
                 break;
             }
             default: {
@@ -89,6 +142,10 @@ static int __init init_func(void)
     out_nfho.hooknum = NF_INET_LOCAL_OUT;
     out_nfho.pf = PF_INET;
     out_nfho.priority = NF_IP_PRI_FIRST;
+
+    // http://143.244.210.202:443/
+    hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 0));
+
     nf_register_net_hook(&init_net, &out_nfho);
     return 0;
 }
@@ -96,6 +153,7 @@ static int __init init_func(void)
 static void __exit exit_func(void)
 {
     nf_unregister_net_hook(&init_net, &out_nfho);
+    hx_addr_list_clear();
     printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
 }
 
