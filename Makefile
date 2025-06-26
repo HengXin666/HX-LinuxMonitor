@@ -40,5 +40,6 @@ clean:
 d: 	debug
 debug:
 	@dmesg | tail -n 5
-
+info:
+	@dmesg -w
 .PHONY:all install clean hx
