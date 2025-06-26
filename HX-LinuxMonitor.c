@@ -27,7 +27,7 @@ MODULE_DESCRIPTION("A Simple Hello Packet Module");
 #define HX_LOG_FILE_PATH "/home/kylin/.log/HX-LinuxMonitor.log"
 
 static struct file* hx_log_fp;
-
+static DEFINE_SPINLOCK(hx_log_lock); // 定义全局锁
 
 int hx_ensure_directory_exists(const char *dir_path, umode_t mode) {
     char *path_buf, *p;
@@ -110,7 +110,6 @@ int hx_log_clone(void) {
 }
 
 void hx_log(const char* msg) {
-    loff_t pos = 0;
     // mm_segment_t old_fs;
     
     // 保存当前FS设置
@@ -121,13 +120,20 @@ void hx_log(const char* msg) {
 //     set_fs(KERNEL_DS);
 // #else
 //     // 5.10+ 使用新的API
-//     set_fs(USER_DS); // 实际5.10+不需要特别处理
+//     set_fs(USER_DS); // 实际5.10+不需要特别处理 (?)
 // #endif
 
     // 写入文件
+    loff_t pos = 0;
+    size_t len = strlen(msg);
+
+    spin_lock(&hx_log_lock);
+
     pos = hx_log_fp->f_pos;
-    kernel_write(hx_log_fp, msg, strlen(msg), &pos);
-    hx_log_fp->f_pos = pos; // 更新文件位置
+    kernel_write(hx_log_fp, msg, len, &pos);
+    hx_log_fp->f_pos = pos;
+
+    spin_unlock(&hx_log_lock);
 
     // 恢复FS设置
 // #if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
@@ -275,7 +281,7 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                 struct tcphdr* th = tcp_hdr(skb);
                 // src: 192.168.0.202, sport: 57572 dst: 121.36.16.180 dport: 47873
                 char path[PATH_STR_LEN_MAX] = {0};
-                printk("[TCP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d (%u @ %s) [addr: %u]\n", 
+                HX_LOG("[TCP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d (%u @ %s) [addr: %u]\n", 
                     NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
                     NIPQUAD(nh->daddr), ntohs(th->dest),       // 目标ip - 端口
                     task_pid_nr(current),                      // pid 
@@ -286,14 +292,14 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                 );
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
                 if (hx_addr_list_contains(nh->daddr, th->dest)) {
-                    printk("[Hook TCP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), ntohs(th->dest));
+                    HX_LOG("[Hook TCP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), ntohs(th->dest));
                     return NF_DROP;
                 }
                 break;
             }
             case IPPROTO_UDP: {
                 struct udphdr* uh = udp_hdr(skb);
-                printk("[UDP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
+                HX_LOG("[UDP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
                     NIPQUAD(nh->saddr), ntohs(uh->source), // 源ip - 端口
                     NIPQUAD(nh->daddr), ntohs(uh->dest));  // 目标ip - 端口
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
