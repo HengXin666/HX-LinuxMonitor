@@ -15,7 +15,9 @@
 #include <linux/fs_struct.h>
 #include <linux/path.h>
 #include <linux/version.h>
-
+#include <linux/namei.h>
+#include <linux/init_task.h> // init_user_ns
+#include <linux/dcache.h>
 #include <linux/uaccess.h>
 
 MODULE_LICENSE("GPL");
@@ -26,12 +28,78 @@ MODULE_DESCRIPTION("A Simple Hello Packet Module");
 
 static struct file* hx_log_fp;
 
+
+int hx_ensure_directory_exists(const char *dir_path, umode_t mode) {
+    char *path_buf, *p;
+    int ret = 0;
+
+    // 拷贝路径，防止修改原始字符串
+    path_buf = kstrdup(dir_path, GFP_KERNEL);
+    if (!path_buf)
+        return -ENOMEM;
+
+    // 忽略前导 '/'
+    if (path_buf[0] == '/')
+        p = path_buf + 1;
+    else
+        p = path_buf;
+
+    while (1) {
+        char *next = strchr(p, '/');
+        if (next)
+            *next = '\0';
+
+        char *partial_path = kasprintf(GFP_KERNEL, "/%s", path_buf);
+        if (!partial_path) {
+            ret = -ENOMEM;
+            break;
+        }
+
+        struct path path;
+        ret = kern_path(partial_path, LOOKUP_DIRECTORY, &path);
+        if (ret != 0) {
+            // 不存在则尝试创建
+            struct path parent_path;
+            struct dentry *dentry;
+            dentry = kern_path_create(AT_FDCWD, partial_path, &parent_path, 0);
+            if (IS_ERR(dentry)) {
+                ret = PTR_ERR(dentry);
+                kfree(partial_path);
+                break;
+            }
+
+            ret = vfs_mkdir(d_inode(parent_path.dentry), dentry, mode);
+            done_path_create(&parent_path, dentry);
+        } else {
+            path_put(&path); // 已存在
+        }
+
+        kfree(partial_path);
+
+        if (!next)
+            break;
+
+        *next = '/'; // 还原路径分隔符
+        p = next + 1;
+        if (*p == '\0') // 如果路径结尾是 '/', 则终止
+            break;
+    }
+
+    kfree(path_buf);
+    return ret;
+}
+
 int hx_log_init(void) {
-    // @todo 应该判断是否存在这个文件夹, 然后创建文件夹...
-    hx_log_fp = filp_open(HX_LOG_FILE_PATH, O_RDWR | O_CREAT, 0644);
+    // 在hx_log_init中添加目录创建
+    int err = hx_ensure_directory_exists("/home/kylin/.log", 0755);
+    if (err < 0) {
+        printk("open log dir, err = %d\n", err);
+        return -1;
+    }
+    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT, 0644);
     if (IS_ERR(hx_log_fp)) {
         int ret = PTR_ERR(hx_log_fp);
-        printk(KERN_INFO "open log failed, err = %d\n", ret);
+        printk("open log failed, err = %d\n", ret);
         return -1;
     }
     return 0;
@@ -42,27 +110,29 @@ int hx_log_clone(void) {
 }
 
 void hx_log(const char* msg) {
-    loff_t pos;
-#if 0
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
-    old_fs = get_fs();
-    set_fs( get_ds() );
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
-    old_fs = get_fs();
-    set_fs( KERNEL_DS );
-#else
-    old_fs = force_uaccess_begin();
-#endif
-#endif
+    loff_t pos = 0;
+    // mm_segment_t old_fs;
+    
+    // 保存当前FS设置
+    // old_fs = get_fs();
+    
+    // 设置内核空间访问权限
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+//     set_fs(KERNEL_DS);
+// #else
+//     // 5.10+ 使用新的API
+//     set_fs(USER_DS); // 实际5.10+不需要特别处理
+// #endif
+
+    // 写入文件
     pos = hx_log_fp->f_pos;
     kernel_write(hx_log_fp, msg, strlen(msg), &pos);
-#if 0
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
-    set_fs(old_fs);
-#else
-    force_uaccess_end(old_fs);
-#endif
-#endif
+    hx_log_fp->f_pos = pos; // 更新文件位置
+
+    // 恢复FS设置
+// #if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+//     set_fs(old_fs);
+// #endif
 }
 
 #if 0
@@ -74,13 +144,15 @@ void hx_log(const char* msg) {
     } while (0)
 #else
 void HX_LOG(const char *fmt, ...) {
-    char buf[64] = {0};
+    char buf[256] = {0};  // 增加缓冲区大小
     va_list args;
     va_start(args, fmt);
-    vsprintf(buf, fmt, args);
+    vsnprintf(buf, sizeof(buf), fmt, args); // 使用更安全的vsnprintf
     va_end(args);
-    // hx_log(buf);
-    printk(buf);
+    
+    // 同时写入内核日志和自定义文件
+    printk("%s", buf);    // 内核日志
+    hx_log(buf);          // 自定义文件
 }
 #endif
 
@@ -190,8 +262,8 @@ void __info_path_test(void) {
 unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
 #define PATH_STR_LEN_MAX 96
 #define NIPQUAD(addr) ((unsigned char *)&addr)[0], \
-                      ((unsigned char *)&addr)[1], \ 
-                      ((unsigned char *)&addr)[2], \ 
+                      ((unsigned char *)&addr)[1], \
+                      ((unsigned char *)&addr)[2], \
                       ((unsigned char *)&addr)[3]
 
     // 如果是ip协议
@@ -274,10 +346,10 @@ static int __init init_func(void) {
     hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 443));
     
     printk("run ...\n");
-    // if (hx_log_init() < 0) {
-    //     printk("error log init");
-    //     return -1;
-    // }
+    if (hx_log_init() < 0) {
+        printk("error log init");
+        return -1;
+    }
     nf_register_net_hook(&init_net, &out_nfho);
     return 0;
 }
@@ -285,7 +357,7 @@ static int __init init_func(void) {
 static void __exit exit_func(void) {
     nf_unregister_net_hook(&init_net, &out_nfho);
     hx_addr_list_clear();
-    // hx_log_clone();
+    hx_log_clone();
     printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
 }
 
