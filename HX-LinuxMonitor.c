@@ -5,54 +5,64 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netdevice.h>
 #include <linux/vmalloc.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
 
-enum
+struct Data
 {
-    NF_IP_PRE_ROUTING,
-    NF_IP_LOCAL_IN,
-    NF_IP_FORWARD,
-    NF_IP_LOCAL_OUT,
-    NF_IP_POST_ROUTING,
-    NF_IP_NUMHOOKS
+    const char *ip;
+    int port;
 };
 
-static struct nf_hook_ops in_nfho;  // net filter hook option struct
 static struct nf_hook_ops out_nfho; // net filter hook option struct
 
-static void dump_addr(unsigned char *iphdr)
+unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
 {
-    int i;
-    // @todo 有bug...
-    unsigned char str[24] = {};
-    for (i = 0; i < 4; i++)
-    {
-        str[i * 2] = *(iphdr + 12 + i);
-        str[i * 2 + 1] = '.';
-    }
-    str[8] = '-';
-    str[9] = '>';
-    for (i = 0; i < 4; i++)
-    {
-        str[i * 2 + 10] = *(iphdr + 16 + i);
-        str[i * 2 + 1 + 10] = '.';
-    }
-    printk("%s\n", str);
-}
+#define NIPQUAD(addr) ((unsigned char *)&addr)[0], \
+                      ((unsigned char *)&addr)[1], \ 
+                      ((unsigned char *)&addr)[2], \ 
+                      ((unsigned char *)&addr)[3]
 
-unsigned int my_hook(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
-{
-    printk("Hello packet! ");
-    // printk("from %s to %s\n", in->name, out->name);
-    unsigned char *iphdr = skb_network_header(skb);
-    if (iphdr)
-    {
-        dump_addr(iphdr);
+    // 如果是ip协议
+    if ((skb->protocol) == htons(ETH_P_IP)) {
+        struct iphdr* nh = ip_hdr(skb);
+        // printk("src: %u.%u.%u.%u, dst: %u.%u.%u.%u\n", NIPQUAD(nh->saddr), NIPQUAD(nh->daddr));
+        switch (nh->protocol) {
+            case IPPROTO_TCP: {
+                struct tcphdr* th = tcp_hdr(skb);
+                // src: 192.168.0.202, sport: 57572 dst: 121.36.16.180 dport: 47873 
+                printk("[TCP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
+                    NIPQUAD(nh->saddr), th->source, // 源ip - 端口
+                    NIPQUAD(nh->daddr), th->dest);  // 目标ip - 端口
+                    
+                // 如果目标 ip:端口 是黑名单内容, 则禁止
+                break;
+            }
+            case IPPROTO_UDP: {
+                struct udphdr* uh = udp_hdr(skb);
+                printk("[UDP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
+                    NIPQUAD(nh->saddr), uh->source, // 源ip - 端口
+                    NIPQUAD(nh->daddr), uh->dest);  // 目标ip - 端口
+                break;
+            }
+            case IPPROTO_IPV6: {
+                printk("[IPv6]"); // @todo
+                break;
+            }
+            default: {
+                break;
+            }
+        }
     }
+
     return NF_ACCEPT;
-    // return NF_DROP;//会导致上不了网
+
+#undef NIPQUAD
+    // return NF_DROP; //会导致上不了网
 }
 
 static int __init init_func(void)
@@ -73,27 +83,18 @@ static int __init init_func(void)
     NF_IP_LOCAL_OUT: 由本机发出去的报文，并且在路由之前。
     NF_IP_POST_ROUTING: 所有即将离开本机的报文。
     */
-    // NF_IP_PRE_ROUTING hook
-    in_nfho.hook = my_hook;
-    in_nfho.hooknum = NF_IP_LOCAL_IN;
-    in_nfho.pf = PF_INET;
-    in_nfho.priority = NF_IP_PRI_FIRST;
-
-    nf_register_net_hook(&init_net, &in_nfho);
-
     // NF_IP_LOCAL_OUT hook
-    out_nfho.hook = my_hook;
-    out_nfho.hooknum = NF_IP_LOCAL_OUT;
+    printk("run ...\n");
+    out_nfho.hook = hook_sent_request;
+    out_nfho.hooknum = NF_INET_LOCAL_OUT;
     out_nfho.pf = PF_INET;
     out_nfho.priority = NF_IP_PRI_FIRST;
-
     nf_register_net_hook(&init_net, &out_nfho);
     return 0;
 }
 
 static void __exit exit_func(void)
 {
-    nf_unregister_net_hook(&init_net, &in_nfho);
     nf_unregister_net_hook(&init_net, &out_nfho);
     printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
 }
