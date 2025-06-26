@@ -200,3 +200,74 @@ MODULE_LICENSE("GPL");
 - https://github.com/noahyzhang/file_io_hook 文件 IO 监控
 
 - https://blog.csdn.net/jinking01/article/details/126728429 Linux利用hook技术实现文件监控和网络过滤
+
+```c
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/kprobes.h>
+#include <linux/fs.h>
+#include <linux/sched.h>
+#include <linux/version.h>
+#include <linux/namei.h>
+
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("File Open Monitor");
+
+// 定义 kprobe 结构体
+static struct kprobe open_kp;
+
+// 原始 do_sys_openat2 函数类型
+typedef long (*openat2_func_t)(int, const char __user *, struct open_how *);
+
+// kprobe 前置处理函数
+static int handler_pre(struct kprobe *p, struct pt_regs *regs)
+{
+    int dfd = (int)regs->di;                          // 第一个参数：目录文件描述符
+    const char __user *filename = (const char __user *)regs->si; // 第二个参数：文件名
+    struct open_how *how = (struct open_how *)regs->dx; // 第三个参数：打开方式
+    
+    char fname[256] = {0};
+    char process_name[TASK_COMM_LEN] = {0};
+    
+    // 获取进程名
+    get_task_comm(process_name, current);
+    
+    // 安全地从用户空间复制文件名
+    if (strncpy_from_user(fname, filename, sizeof(fname) - 1) > 0) {
+        printk(KERN_INFO "FileOpenMonitor: Process %s (PID: %d) opening: %s\n",
+               process_name, task_pid_nr(current), fname);
+    }
+
+    return 0; // 继续执行原函数
+}
+
+static int __init monitor_init(void)
+{
+    open_kp.pre_handler = handler_pre;
+    
+    // 根据内核版本设置要钩住的函数名
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,6,0)
+    open_kp.symbol_name = "do_sys_openat2";  // Linux 5.6+
+#else
+    open_kp.symbol_name = "do_sys_open";     // Linux < 5.6
+#endif
+
+    // 注册 kprobe
+    if (register_kprobe(&open_kp)) {
+        printk(KERN_ERR "Failed to register kprobe\n");
+        return -1;
+    }
+
+    printk(KERN_INFO "FileOpenMonitor installed\n");
+    return 0;
+}
+
+static void __exit monitor_exit(void)
+{
+    unregister_kprobe(&open_kp);
+    printk(KERN_INFO "FileOpenMonitor removed\n");
+}
+
+module_init(monitor_init);
+module_exit(monitor_exit);
+```
