@@ -14,9 +14,75 @@
 #include <linux/fs.h>
 #include <linux/fs_struct.h>
 #include <linux/path.h>
+#include <linux/version.h>
+
+#include <linux/uaccess.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
+
+// 文件 io
+#define HX_LOG_FILE_PATH "/home/kylin/.log/HX-LinuxMonitor.log"
+
+static struct file* hx_log_fp;
+
+int hx_log_init(void) {
+    // @todo 应该判断是否存在这个文件夹, 然后创建文件夹...
+    hx_log_fp = filp_open(HX_LOG_FILE_PATH, O_RDWR | O_CREAT, 0644);
+    if (IS_ERR(hx_log_fp)) {
+        int ret = PTR_ERR(hx_log_fp);
+        printk(KERN_INFO "open log failed, err = %d\n", ret);
+        return -1;
+    }
+    return 0;
+}
+
+int hx_log_clone(void) {
+    return filp_close(hx_log_fp, NULL);
+}
+
+void hx_log(const char* msg) {
+    loff_t pos;
+#if 0
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
+    old_fs = get_fs();
+    set_fs( get_ds() );
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+    old_fs = get_fs();
+    set_fs( KERNEL_DS );
+#else
+    old_fs = force_uaccess_begin();
+#endif
+#endif
+    pos = hx_log_fp->f_pos;
+    kernel_write(hx_log_fp, msg, strlen(msg), &pos);
+#if 0
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
+    set_fs(old_fs);
+#else
+    force_uaccess_end(old_fs);
+#endif
+#endif
+}
+
+#if 0
+#define HX_LOG(__STR__, ...)                                   \
+    do {                                                       \
+        char _hx_msg_#__LINE__[64] = {0};                      \
+        vsprintf(_hx_msg_#__LINE__,  __STR__, ##__VA_ARGS__);  \
+        hx_log(_hx_msg_#__LINE__);                             \
+    } while (0)
+#else
+void HX_LOG(const char *fmt, ...) {
+    char buf[64] = {0};
+    va_list args;
+    va_start(args, fmt);
+    vsprintf(buf, fmt, args);
+    va_end(args);
+    // hx_log(buf);
+    printk(buf);
+}
+#endif
 
 // 可存储 ipv4/ipv6 - 端口 的数据结构
 struct hx_addrinfo {
@@ -67,15 +133,13 @@ int hx_addr_list_contains(__be32 addr, uint16_t port) {
         ) {
             return 1;
         }
-        printk("[dg]: %u != %u, %u != %u", addr, node->data->addr, port, node->data->port);
     }
     return 0;
 }
 
 static struct nf_hook_ops out_nfho; // net filter hook option struct
 
-
-void _info_path(void) {
+void __info_path_test(void) {
     /*
     [  384.550951] current path = 桌面
     [  384.550952] root path = /
@@ -123,8 +187,7 @@ void _info_path(void) {
 #undef TASK_PATH_MAX_LENGTH
 }
 
-unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state)
-{
+unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
 #define PATH_STR_LEN_MAX 96
 #define NIPQUAD(addr) ((unsigned char *)&addr)[0], \
                       ((unsigned char *)&addr)[1], \ 
@@ -149,7 +212,6 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                         : "",
                     nh->daddr
                 );
-                // _info_path();
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
                 if (hx_addr_list_contains(nh->daddr, th->dest)) {
                     printk("[Hook TCP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), ntohs(th->dest));
@@ -183,11 +245,9 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
 
 #undef NIPQUAD
 #undef PATH_STR_LEN_MAX
-// return NF_DROP; //会导致上不了网
 }
 
-static int __init init_func(void)
-{
+static int __init init_func(void) {
     /* from: https://zhuanlan.zhihu.com/p/81866818
     --->[NF_IP_PRE_ROUTING]--->[ROUTE]--->[NF_IP_FORWARD]--->[NF_IP_POST_ROUTING]--->
                               |                        ^
@@ -214,14 +274,18 @@ static int __init init_func(void)
     hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 443));
     
     printk("run ...\n");
+    // if (hx_log_init() < 0) {
+    //     printk("error log init");
+    //     return -1;
+    // }
     nf_register_net_hook(&init_net, &out_nfho);
     return 0;
 }
 
-static void __exit exit_func(void)
-{
+static void __exit exit_func(void) {
     nf_unregister_net_hook(&init_net, &out_nfho);
     hx_addr_list_clear();
+    // hx_log_clone();
     printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
 }
 

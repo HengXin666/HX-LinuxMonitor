@@ -3,6 +3,8 @@ OBJ=$(TARGET).o
 MODULE=$(TARGET).ko
 obj-m+=$(OBJ)
 
+ccflags-y := -std=gnu99 -Wno-declaration-after-statement
+
 EXTRA_CFLAGS+=-g -O2 # -x c++ # 左边这样写是编译c++
 CURRENT_PATH:=$(shell pwd)
 LINUX_KERNAL:=$(shell uname -r)
