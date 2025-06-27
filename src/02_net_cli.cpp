@@ -20,40 +20,21 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QCloseEvent>
-
-class PasswordDialog : public QDialog {
-    Q_OBJECT
-public:
-    PasswordDialog(QWidget *parent = nullptr) : QDialog(parent) {
-        setWindowTitle("输入sudo密码");
-        QVBoxLayout *layout = new QVBoxLayout(this);
-        
-        layout->addWidget(new QLabel("需要root权限:"));
-        passwordEdit = new QLineEdit();
-        passwordEdit->setEchoMode(QLineEdit::Password);
-        layout->addWidget(passwordEdit);
-        
-        QDialogButtonBox *buttons = new QDialogButtonBox(
-            QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
-        layout->addWidget(buttons);
-        
-        connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    }
-    
-    QString getPassword() const {
-        return passwordEdit->text();
-    }
-
-private:
-    QLineEdit *passwordEdit;
-};
+#include <unistd.h>  
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
     MainWindow(QWidget *parent = nullptr) : QMainWindow(parent) {
+        // 检查是否以root权限运行
+        if (geteuid() != 0) {
+            QMessageBox::critical(nullptr, "错误", "请使用管理员权限运行此程序！\n"
+                                           "可以使用: sudo ./程序名 或 pkexec ./程序名");
+            QTimer::singleShot(0, qApp, &QApplication::quit);
+            return;
+        }
+
         setupUI();
         setupConnections();
         setupLogWatcher();
@@ -116,7 +97,7 @@ private slots:
     
     void saveConfig() {
         // 确保配置目录存在
-        QDir configDir(QDir::homePath() + "/config");
+        QDir configDir("/hx/config");
         if (!configDir.exists()) {
             if (!configDir.mkpath(".")) {
                 QMessageBox::critical(this, "错误", "无法创建配置目录");
@@ -139,27 +120,11 @@ private slots:
     }
     
     void loadKernelModule() {
-        PasswordDialog dialog(this);
-        if (dialog.exec() != QDialog::Accepted) {
-            return;
-        }
-        
-        QString password = dialog.getPassword();
-        if (password.isEmpty()) {
-            QMessageBox::warning(this, "警告", "密码不能为空");
-            return;
-        }
-        
         // 获取当前用户的主目录路径
-        QString homePath = QDir::homePath();
-        QString configPath = homePath + "/config/hx_net.config";
+        QString configPath = "/hx/config/hx_net.config";
         
         QProcess process;
-        // 使用绝对路径加载模块，并传递配置文件路径作为参数
-        QString command = QString("echo '%1' | sudo -S insmod hx_net.ko config_path=\"%2\"")
-                         .arg(password)
-                         .arg(configPath);
-        process.start("bash", QStringList() << "-c" << command);
+        process.start("insmod", QStringList() << "hx_net.ko" << QString("config_path=%1").arg(configPath));
         process.waitForFinished();
         
         if (process.exitCode() != 0) {
@@ -178,21 +143,8 @@ private slots:
             return;
         }
         
-        PasswordDialog dialog(this);
-        if (dialog.exec() != QDialog::Accepted) {
-            return;
-        }
-        
-        QString password = dialog.getPassword();
-        if (password.isEmpty()) {
-            QMessageBox::warning(this, "警告", "密码不能为空");
-            return;
-        }
-        
         QProcess process;
-        QString command = QString("echo '%1' | sudo -S rmmod hx_net.ko")
-                         .arg(password);
-        process.start("bash", QStringList() << "-c" << command);
+        process.start("rmmod", QStringList() << "hx_net.ko");
         process.waitForFinished();
         
         if (process.exitCode() != 0) {
@@ -205,7 +157,7 @@ private slots:
     
     void checkLogChanges() {
         // 尝试读取应用日志
-        QString logPath = QDir::homePath() + "/log/hx_net.log";
+        QString logPath = "/hx/log/hx_net.log";
         QFile appLogFile(logPath);
         if (appLogFile.exists()) {
             if (appLogFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -293,7 +245,7 @@ private:
         mainLayout->addWidget(logOutput);
         
         setCentralWidget(centralWidget);
-        setWindowTitle("HX Net 配置工具");
+        setWindowTitle("HX Net 配置工具 (管理员模式)");
         resize(800, 600);
     }
     
@@ -306,7 +258,7 @@ private:
     
     void setupLogWatcher() {
         // 创建日志目录（如果不存在）
-        QDir logDir(QDir::homePath() + "/log");
+        QDir logDir("/hx/log");
         if (!logDir.exists()) {
             if (!logDir.mkpath(".")) {
                 QMessageBox::critical(this, "错误", "无法创建日志目录");
@@ -341,7 +293,7 @@ private:
     }
     
     void loadConfig() {
-        QFile configFile(QDir::homePath() + "/config/hx_net.config");
+        QFile configFile("/hx/config/hx_net.config");
         if (configFile.exists() && configFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&configFile);
             while (!in.atEnd()) {
