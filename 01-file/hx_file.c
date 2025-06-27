@@ -4,6 +4,8 @@
 #include <linux/uaccess.h>
 #include <linux/string.h>
 #include <linux/syscalls.h>
+#include "../hx/hx_dir_tools.h"
+#include "../hx/hx_log.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Heng_Xin");
@@ -13,6 +15,169 @@ MODULE_DESCRIPTION("Kprobe example to intercept .c file open");
 static struct kprobe kp = {
     .symbol_name = "do_sys_open",
 };
+
+// 数据
+struct hx_str_node {
+    const char* data;
+    struct hx_str_node* next;
+};
+
+static struct hx_str_node hx_file_list;
+static struct hx_str_node hx_process_list;
+
+// 头插法
+void hx_str_list_push_front(struct hx_str_node* head, const char* data) {
+    struct hx_str_node* node = (struct hx_str_node*)kmalloc(sizeof(struct hx_str_node), GFP_KERNEL);
+    node->next = head->next;
+    head->next = node;
+    node->data = data;
+}
+
+// 清空链表
+void hx_str_list_clear(struct hx_str_node* head) {
+    struct hx_str_node* node = head->next;
+    while (node) {
+        kfree(node->data);
+        struct hx_str_node* nx = node->next;
+        kfree(node);
+        node = nx;
+    }
+}
+
+int hx_str_list_contains(struct hx_str_node* head, const char* data) {
+    if (!data)
+        return 0;
+    struct hx_str_node* node = head->next;
+    size_t n = strlen(data);
+    for (; node; node = node->next) {
+        if (strncmp(node->data, data, n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int hx_config_load_process(void) {
+    static struct file* fp;
+    int err = hx_ensure_directory_exists("/hx/config", 0755);
+    if (err < 0) {
+        printk("open config dir, err = %d\n", err);
+        return -1;
+    }
+    fp = filp_open("/hx/config/hx_file_p.config", O_RDONLY | O_CREAT, 0644);
+    if (IS_ERR(fp)) {
+        int ret = PTR_ERR(fp);
+        printk("open config failed, err = %d\n", ret);
+        return -1;
+    }
+    // 获取文件大小并分配缓冲区
+    loff_t file_size = i_size_read(file_inode(fp));
+    char *file_buf = kzalloc(file_size + 1, GFP_KERNEL);
+    if (!file_buf) {
+        printk("alloc memory failed\n");
+        filp_close(fp, NULL);
+        return -ENOMEM;
+    }
+
+    // 读取文件内容
+    int read_bytes = kernel_read(fp, file_buf, file_size, &(loff_t){0});
+    if (read_bytes < 0) {
+        printk("read config failed, err (read_bytes) = %d\n", read_bytes);
+        kfree(file_buf);
+        filp_close(fp, NULL);
+        return -1;
+    }
+    file_buf[read_bytes] = '\0';
+
+    // 逐行解析文件路径
+    char *line = file_buf;
+    while (line && *line) {
+        char *next_line = strchr(line, '\n');
+        if (next_line) {
+            *next_line = '\0';  // 替换换行符为字符串结束符
+            next_line++;        // 移动到下一行
+        }
+
+        // 跳过空行和注释行(以#开头)
+        if (*line == '\0' || *line == '#') {
+            line = next_line;
+            continue;
+        }
+
+        // 直接使用整行作为文件路径
+        printk("loaded config - file path: %s\n", line);
+        
+        // 将文件路径添加到链表
+        hx_str_list_push_front(&hx_process_list, line);
+        
+        line = next_line;  // 处理下一行
+    }
+
+    kfree(file_buf);
+    filp_close(fp, NULL);
+    return 0;
+}
+
+int hx_config_load_file(void) {
+    static struct file* fp;
+    int err = hx_ensure_directory_exists("/hx/config", 0755);
+    if (err < 0) {
+        printk("open config dir, err = %d\n", err);
+        return -1;
+    }
+    fp = filp_open("/hx/config/hx_file_f.config", O_RDONLY | O_CREAT, 0644);
+    if (IS_ERR(fp)) {
+        int ret = PTR_ERR(fp);
+        printk("open config failed, err = %d\n", ret);
+        return -1;
+    }
+    // 获取文件大小并分配缓冲区
+    loff_t file_size = i_size_read(file_inode(fp));
+    char *file_buf = kzalloc(file_size + 1, GFP_KERNEL);
+    if (!file_buf) {
+        printk("alloc memory failed\n");
+        filp_close(fp, NULL);
+        return -ENOMEM;
+    }
+
+    // 读取文件内容
+    int read_bytes = kernel_read(fp, file_buf, file_size, &(loff_t){0});
+    if (read_bytes < 0) {
+        printk("read config failed, err (read_bytes) = %d\n", read_bytes);
+        kfree(file_buf);
+        filp_close(fp, NULL);
+        return -1;
+    }
+    file_buf[read_bytes] = '\0';
+
+    // 逐行解析文件路径
+    char *line = file_buf;
+    while (line && *line) {
+        char *next_line = strchr(line, '\n');
+        if (next_line) {
+            *next_line = '\0';  // 替换换行符为字符串结束符
+            next_line++;        // 移动到下一行
+        }
+
+        // 跳过空行和注释行(以#开头)
+        if (*line == '\0' || *line == '#') {
+            line = next_line;
+            continue;
+        }
+
+        // 直接使用整行作为文件路径
+        printk("loaded config - file path: %s\n", line);
+        
+        // 将文件路径添加到链表
+        hx_str_list_push_front(&hx_file_list, line);
+        
+        line = next_line;  // 处理下一行
+    }
+
+    kfree(file_buf);
+    filp_close(fp, NULL);
+    return 0;
+}
 
 static int pre_handler(struct kprobe *p, struct pt_regs *regs) {
     char __user *filename_user = NULL;
@@ -41,15 +206,15 @@ static int pre_handler(struct kprobe *p, struct pt_regs *regs) {
 
     pid_t pid = current->pid;
     const char *comm = current->comm;
-    printk(KERN_INFO "PID %d (%s) try open file: %s\n", pid, comm, filename);
 
-    // 简单判断是否以 ".c" 结尾
-    if (strlen(filename) > 2 && strcmp(filename + strlen(filename) - 2, ".c") == 0) {
-        printk(KERN_INFO "Intercepted open .c file: %s\n", filename);
+    if (hx_str_list_contains(&hx_file_list, filename) && !hx_str_list_contains(&hx_process_list, comm)) {
         // 这里返回 -EACCES 拒绝打开文件
         regs->ax = -EACCES;
         // 让 kprobe 跳过原函数，直接返回错误
+        HX_LOG("[HOOK OPEN]: PID = %d, src = %s try open: %s\n", pid, comm, filename);
         return 1; 
+    } else {
+        HX_LOG("[PASS OPEN]: PID = %d, src = %s opened: %s\n", pid, comm, filename);
     }
 
     return 0;
@@ -57,7 +222,18 @@ static int pre_handler(struct kprobe *p, struct pt_regs *regs) {
 
 static int __init kprobe_init(void) {
     int ret;
-
+    if (hx_config_load_file() < 0) {
+        printk("err: hx_config_load_file");
+        return -1;
+    }
+    if (hx_config_load_process() < 0) {
+        printk("err: hx_config_load_file");
+        return -1;
+    }
+    if (hx_log_init("/hx/log", "hx_file.log") < 0) {
+        printk("err: hx_log_init");
+        return -1;
+    }
     kp.pre_handler = pre_handler;
 
     ret = register_kprobe(&kp);
@@ -71,6 +247,7 @@ static int __init kprobe_init(void) {
 
 static void __exit kprobe_exit(void) {
     unregister_kprobe(&kp);
+    hx_log_clone();
     printk(KERN_INFO "kprobe unregistered\n");
 }
 
