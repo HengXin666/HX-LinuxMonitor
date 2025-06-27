@@ -29,7 +29,8 @@ MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
 
 // 文件 io
-#define HX_LOG_FILE_PATH "/home/kylin/.log/HX-LinuxMonitor.log"
+#define HX_LOG_FILE_PATH "/home/kylin/.log/hx.log"
+#define HX_CONFIG_FILE_PATH "/home/kylin/.config/hx.config"
 
 static struct file* hx_log_fp;
 static DEFINE_SPINLOCK(hx_log_lock); // 定义全局锁
@@ -101,7 +102,7 @@ int hx_log_init(void) {
         printk("open log dir, err = %d\n", err);
         return -1;
     }
-    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT | O_SYNC, 0644);
+    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (IS_ERR(hx_log_fp)) {
         int ret = PTR_ERR(hx_log_fp);
         printk("open log failed, err = %d\n", ret);
@@ -114,6 +115,7 @@ int hx_log_clone(void) {
     return filp_close(hx_log_fp, NULL);
 }
 
+// @todo 读写有问题... 还是会竞争然后卡死
 void hx_log(const char* msg) {
     // mm_segment_t old_fs;
     
@@ -155,8 +157,8 @@ void hx_log(const char* msg) {
     } while (0)
 #else
 void HX_LOG(const char *fmt, ...) {
-    char buf[128] = {0};
-    char msg[196] = {0};
+    char buf[320] = {0};
+    char msg[320] = {0};
     va_list args;
     va_start(args, fmt);
     vsnprintf(buf, sizeof(buf), fmt, args);
@@ -174,8 +176,8 @@ void HX_LOG(const char *fmt, ...) {
         tm.tm_hour, tm.tm_min, tm.tm_sec, buf);
 
     // 同时写入内核日志和自定义文件
-    // printk("%s", msg);    // 内核日志
-    hx_log(msg);          // 自定义文件
+    printk("%s", msg);    // 内核日志
+    // hx_log(msg);          // 自定义文件
 }
 #endif
 
@@ -232,55 +234,91 @@ int hx_addr_list_contains(__be32 addr, uint16_t port) {
     return 0;
 }
 
-static struct nf_hook_ops out_nfho; // net filter hook option struct
-
-void __info_path_test(void) {
-    /*
-    [  384.550951] current path = 桌面
-    [  384.550952] root path = /
-    [  384.550953] task_path_1 = /home/kylin/hx/cmake/firefox/firefox-bin
-    [  384.550954] task_path_2 = /home/kylin/hx/cmake/firefox/firefox-bin
-    */
-   struct qstr root_task_path;
-   struct qstr current_task_path;
-   
-#define TASK_PATH_MAX_LENGTH 64
-    char buf_1[TASK_PATH_MAX_LENGTH] = {0};
-    char *task_path_1 = NULL;
-
-    char buf_2[TASK_PATH_MAX_LENGTH] = {0};
-    char *task_path_2 = NULL;
-
-	//获取当前目录名
-    current_task_path = current->fs->pwd.dentry->d_name;
-    //获取根目录
-    root_task_path = current->fs->root.dentry->d_name;
-
-	//内核线程的 mm 成员为空，这里没做判断
-    if (!current->mm) {
-        printk("null: mm");
-        return;
+int hx_config_load(void) {
+    static struct file* fp;
+    int err = hx_ensure_directory_exists("/home/kylin/.config", 0755);
+    if (err < 0) {
+        printk("open log dir, err = %d\n", err);
+        return -1;
     }
-	
-    //2.6.32 没有dentry_path_raw API
-    //获取文件全路径
-    task_path_1 = dentry_path_raw(current->mm->exe_file->f_path.dentry, buf_1, TASK_PATH_MAX_LENGTH);
-
-	//获取文件全路径
-	//调用d_path函数文件的路径时，应该使用返回的指针：task_path_2 ，而不是转递进去的参数buf：buf_2
-    task_path_2 = d_path(&current->mm->exe_file->f_path, buf_2, TASK_PATH_MAX_LENGTH);
-    if (IS_ERR(task_path_2)) {
-        printk("Get path failed\n");
-        return;
+    fp = filp_open(HX_CONFIG_FILE_PATH, O_RDONLY | O_CREAT, 0644);
+    if (IS_ERR(fp)) {
+        int ret = PTR_ERR(fp);
+        printk("open log failed, err = %d\n", ret);
+        return -1;
+    }
+    // 解析, 按照 : 分割 (ip:端口)
+    // 读取整个文件内容
+    loff_t file_size = i_size_read(file_inode(fp));
+    char *file_buf = kzalloc(file_size + 1, GFP_KERNEL);
+    if (!file_buf) {
+        printk("alloc memory failed\n");
+        filp_close(fp, NULL);
+        return -ENOMEM;
     }
 
-    printk("current path = %s\n", current_task_path.name);
-    printk("root path = %s\n", root_task_path.name);
-    printk("task_path_1 = %s\n", task_path_1);
-    printk("task_path_2 = %s\n", task_path_2);
+    // mm_segment_t old_fs = get_fs();
+    // set_fs(KERNEL_DS);
+    int read_bytes = kernel_read(fp, file_buf, file_size, &(loff_t){0});
+    // set_fs(old_fs);
+    
+    if (read_bytes < 0) {
+        printk("read config failed, err (read_bytes) = %d\n", read_bytes);
+        kfree(file_buf);
+        filp_close(fp, NULL);
+        return -1;
+    }
+    file_buf[read_bytes] = '\0';
 
-#undef TASK_PATH_MAX_LENGTH
+    // 逐行解析
+    char *line = file_buf;
+    while (line && *line) {
+        char *next_line = strchr(line, '\n');
+        if (next_line) {
+            *next_line = '\0';  // 替换换行符为字符串结束符
+            next_line++;        // 移动到下一行
+        }
+
+        // 跳过空行和注释行(以#开头)
+        if (*line == '\0' || *line == '#') {
+            line = next_line;
+            continue;
+        }
+
+        // 解析ip:port
+        char *ip = line;
+        char *port_str = strchr(line, ':');
+        if (!port_str) {
+            printk("无效的配置格式，行中缺少 ':': %s\n", line); // 表示为该ip下任意端口
+            line = next_line;
+            hx_addr_list_push_front(make_hx_addrinfo(ip, 0));
+            continue;
+        }
+        
+        *port_str = '\0';  // 分隔ip和port
+        port_str++;
+        
+        // 转换端口号
+        unsigned short port;
+        if (kstrtou16(port_str, 10, &port)) {
+            printk("行中的端口号无效: %s\n", line);
+            line = next_line;
+            continue;
+        }
+
+        printk("loaded config - ip: %s, port: %d\n", ip, port);
+        
+        hx_addr_list_push_front(make_hx_addrinfo(ip, port));
+        
+        line = next_line;  // 处理下一行
+    }
+
+    kfree(file_buf);
+    filp_close(fp, NULL);
+    return 0;
 }
+
+static struct nf_hook_ops out_nfho; // net filter hook option struct
 
 unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
 #define PATH_STR_LEN_MAX 96
@@ -366,8 +404,11 @@ static int __init init_func(void) {
     out_nfho.priority = NF_IP_PRI_FIRST;
     
     // http://143.244.210.202:443/
-    hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 443));
-    
+    // hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 443));
+    if (hx_config_load() < 0) {
+        printk("error config init");
+        return -1;
+    }
     printk("run ...\n");
     if (hx_log_init() < 0) {
         printk("error log init");
