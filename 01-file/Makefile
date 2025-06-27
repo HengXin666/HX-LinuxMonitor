@@ -1,4 +1,4 @@
-TARGET=HX-LinuxMonitor
+TARGET=hx_file
 OBJ=$(TARGET).o 
 MODULE=$(TARGET).ko
 obj-m+=$(OBJ)

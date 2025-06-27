@@ -1,29 +1,4 @@
-#include <linux/module.h> // included for all kernel modules
-#include <linux/kernel.h> // included for KERN_INFO
-#include <linux/init.h>   // included for __init and __exit macros
-#include <linux/netfilter.h>
-#include <linux/netfilter_ipv4.h>
-#include <linux/netdevice.h>
-#include <linux/vmalloc.h>
-#include <linux/ip.h>
-#include <linux/tcp.h>
-#include <linux/udp.h>
-#include <linux/inet.h>
-#include <linux/slab.h>
-#include <linux/pid.h>
-#include <linux/fs.h>
-#include <linux/fs_struct.h>
-#include <linux/path.h>
-#include <linux/version.h>
-#include <linux/namei.h>
-#include <linux/init_task.h> // init_user_ns
-#include <linux/dcache.h>
-#include <linux/uaccess.h>
-#include <linux/ktime.h>
-#include <linux/timer.h>
-#include <linux/timex.h>
-#include <linux/rtc.h>
-#include <linux/timekeeping.h>
+#include "../hx/hx_log.h"
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
@@ -31,155 +6,6 @@ MODULE_DESCRIPTION("A Simple Hello Packet Module");
 // 文件 io
 #define HX_LOG_FILE_PATH "/home/kylin/.log/hx.log"
 #define HX_CONFIG_FILE_PATH "/home/kylin/.config/hx.config"
-
-static struct file* hx_log_fp;
-static DEFINE_SPINLOCK(hx_log_lock); // 定义全局锁
-
-int hx_ensure_directory_exists(const char *dir_path, umode_t mode) {
-    char *path_buf, *p;
-    int ret = 0;
-
-    // 拷贝路径，防止修改原始字符串
-    path_buf = kstrdup(dir_path, GFP_KERNEL);
-    if (!path_buf)
-        return -ENOMEM;
-
-    // 忽略前导 '/'
-    if (path_buf[0] == '/')
-        p = path_buf + 1;
-    else
-        p = path_buf;
-
-    while (1) {
-        char *next = strchr(p, '/');
-        if (next)
-            *next = '\0';
-
-        char *partial_path = kasprintf(GFP_KERNEL, "/%s", path_buf);
-        if (!partial_path) {
-            ret = -ENOMEM;
-            break;
-        }
-
-        struct path path;
-        ret = kern_path(partial_path, LOOKUP_DIRECTORY, &path);
-        if (ret != 0) {
-            // 不存在则尝试创建
-            struct path parent_path;
-            struct dentry *dentry;
-            dentry = kern_path_create(AT_FDCWD, partial_path, &parent_path, 0);
-            if (IS_ERR(dentry)) {
-                ret = PTR_ERR(dentry);
-                kfree(partial_path);
-                break;
-            }
-
-            ret = vfs_mkdir(d_inode(parent_path.dentry), dentry, mode);
-            done_path_create(&parent_path, dentry);
-        } else {
-            path_put(&path); // 已存在
-        }
-
-        kfree(partial_path);
-
-        if (!next)
-            break;
-
-        *next = '/'; // 还原路径分隔符
-        p = next + 1;
-        if (*p == '\0') // 如果路径结尾是 '/', 则终止
-            break;
-    }
-
-    kfree(path_buf);
-    return ret;
-}
-
-int hx_log_init(void) {
-    // 在hx_log_init中添加目录创建
-    int err = hx_ensure_directory_exists("/home/kylin/.log", 0755);
-    if (err < 0) {
-        printk("open log dir, err = %d\n", err);
-        return -1;
-    }
-    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (IS_ERR(hx_log_fp)) {
-        int ret = PTR_ERR(hx_log_fp);
-        printk("open log failed, err = %d\n", ret);
-        return -1;
-    }
-    return 0;
-}
-
-int hx_log_clone(void) {
-    return filp_close(hx_log_fp, NULL);
-}
-
-// @todo 读写有问题... 还是会竞争然后卡死
-void hx_log(const char* msg) {
-    // mm_segment_t old_fs;
-    
-    // 保存当前FS设置
-    // old_fs = get_fs();
-    
-    // 设置内核空间访问权限
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
-//     set_fs(KERNEL_DS);
-// #else
-//     // 5.10+ 使用新的API
-//     set_fs(USER_DS); // 实际5.10+不需要特别处理 (?)
-// #endif
-
-    // 写入文件
-    loff_t pos = 0;
-    size_t len = strlen(msg);
-
-    spin_lock(&hx_log_lock);
-
-    pos = hx_log_fp->f_pos;
-    kernel_write(hx_log_fp, msg, len, &pos);
-    hx_log_fp->f_pos = pos;
-
-    spin_unlock(&hx_log_lock);
-
-    // 恢复FS设置
-// #if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
-//     set_fs(old_fs);
-// #endif
-}
-
-#if 0
-#define HX_LOG(__STR__, ...)                                   \
-    do {                                                       \
-        char _hx_msg_#__LINE__[64] = {0};                      \
-        vsprintf(_hx_msg_#__LINE__,  __STR__, ##__VA_ARGS__);  \
-        hx_log(_hx_msg_#__LINE__);                             \
-    } while (0)
-#else
-void HX_LOG(const char *fmt, ...) {
-    char buf[320] = {0};
-    char msg[320] = {0};
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-
-    ktime_t kt = ktime_get_real(); // 获取 UTC 时间
-    struct timespec64 ts = ktime_to_timespec64(kt);
-    struct tm tm;
-
-    ts.tv_sec += 8 * 60 * 60; // UTC+8
-    time64_to_tm(ts.tv_sec, 0, &tm);
-
-    snprintf(msg, sizeof(msg), "[%04ld-%02d-%02d %02d:%02d:%02d]: %s",
-        tm.tm_year + 1900L, tm.tm_mon + 1, tm.tm_mday,
-        tm.tm_hour, tm.tm_min, tm.tm_sec, buf);
-
-    // 同时写入内核日志和自定义文件
-    printk("%s", msg);    // 内核日志
-    // hx_log(msg);          // 自定义文件
-}
-#endif
 
 // 可存储 ipv4/ipv6 - 端口 的数据结构
 struct hx_addrinfo {
@@ -336,31 +162,51 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                 struct tcphdr* th = tcp_hdr(skb);
                 // src: 192.168.0.202, sport: 57572 dst: 121.36.16.180 dport: 47873
                 char path[PATH_STR_LEN_MAX] = {0};
-                HX_LOG("[TCP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d (%u @ %s) [addr: %u]\n", 
-                    NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
-                    NIPQUAD(nh->daddr), ntohs(th->dest),       // 目标ip - 端口
-                    task_pid_nr(current),                      // pid 
-                    current->mm 
-                        ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-                        : "",
-                    nh->daddr
-                );
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
                 if (hx_addr_list_contains(nh->daddr, th->dest)) {
-                    HX_LOG("[Hook TCP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), ntohs(th->dest));
+                    HX_LOG("[HOOK-TCP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                        NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
+                        task_pid_nr(current),                      // pid 
+                        current->mm 
+                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                            : "null",
+                        NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
+                    );
                     return NF_DROP;
+                } else {
+                    HX_LOG("[PASS-TCP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                        NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
+                        task_pid_nr(current),                      // pid 
+                        current->mm 
+                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                            : "null",
+                        NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
+                    );
                 }
                 break;
             }
             case IPPROTO_UDP: {
                 struct udphdr* uh = udp_hdr(skb);
-                HX_LOG("[UDP] %u.%u.%u.%u:%d -> %u.%u.%u.%u:%d\n", 
-                    NIPQUAD(nh->saddr), ntohs(uh->source), // 源ip - 端口
-                    NIPQUAD(nh->daddr), ntohs(uh->dest));  // 目标ip - 端口
-                // 如果目标 ip:端口 是黑名单内容, 则禁止
+                char path[PATH_STR_LEN_MAX] = {0};
                 if (hx_addr_list_contains(nh->daddr, uh->dest)) {
-                    printk("[Hook UDP] === %u.%u.%u.%u:%d\n", NIPQUAD(nh->daddr), ntohs(uh->dest));
+                    HX_LOG("[HOOK-UDP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                        NIPQUAD(nh->saddr), ntohs(uh->source),     // 源ip - 端口
+                        task_pid_nr(current),                      // pid 
+                        current->mm 
+                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                            : "null",
+                        NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
+                    );
                     return NF_DROP;
+                } else {
+                    HX_LOG("[PASS-UDP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                        NIPQUAD(nh->saddr), ntohs(uh->source),     // 源ip - 端口
+                        task_pid_nr(current),                      // pid 
+                        current->mm 
+                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                            : "null",
+                        NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
+                    );
                 }
                 break;
             }
@@ -403,13 +249,11 @@ static int __init init_func(void) {
     out_nfho.pf = PF_INET;
     out_nfho.priority = NF_IP_PRI_FIRST;
     
-    // http://143.244.210.202:443/
-    // hx_addr_list_push_front(make_hx_addrinfo("143.244.210.202", 443));
     if (hx_config_load() < 0) {
         printk("error config init");
         return -1;
     }
-    printk("run ...\n");
+    printk("run hx_net...\n");
     if (hx_log_init() < 0) {
         printk("error log init");
         return -1;
@@ -422,7 +266,7 @@ static void __exit exit_func(void) {
     nf_unregister_net_hook(&init_net, &out_nfho);
     hx_addr_list_clear();
     hx_log_clone();
-    printk(KERN_INFO "Cleaning up Hello_Packet module.\n");
+    printk(KERN_INFO "hx_net exit\n");
 }
 
 module_init(init_func);
