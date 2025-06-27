@@ -189,132 +189,81 @@ static int pre_handler(struct kprobe* p, struct pt_regs* regs) {
 #define PATH_STR_LEN_MAX 256
     int dfd = (int)regs->di; // openat 的 dfd 参数
     char __user *filename_user = (char __user *)regs->si;
-    char filename[PATH_STR_LEN_MAX];
-    char path_buf[PATH_STR_LEN_MAX]; // 用于 d_path 的缓冲区
+    char filename[PATH_STR_LEN_MAX] = {0};
+    char path_buf1[PATH_STR_LEN_MAX]; // 当前工作目录
+    char path_buf2[PATH_STR_LEN_MAX]; // 可执行文件路径
     char *full_path = NULL;
     char *allocated_full_path = NULL;
-    pid_t pid = current->pid;
-    const char* comm = "null";
+    const char *comm = "null";
     int ret = 0;
 
-    // 复制用户空间的文件名
-    if (strncpy_from_user(filename, filename_user, sizeof(filename)) <= 0) {
-        return 0;
+    // 拷贝用户文件名
+    int name_len = strncpy_from_user(filename, filename_user, sizeof(filename));
+    if (name_len <= 0) {
+        HX_LOG("[HX_ERROR] 无法从用户空间复制文件名，地址: %px\n", filename_user);
+        goto cleanup;
     }
     filename[sizeof(filename) - 1] = '\0';
 
-    // 处理路径 仅支持绝对路径或 AT_FDCWD 的相对路径
+    // 处理路径
     if (filename[0] == '/') {
-        // 绝对路径直接使用
         full_path = filename;
     } else if (dfd == AT_FDCWD) {
-        // 相对路径 + 当前工作目录
         struct path pwd;
         get_fs_pwd(current->fs, &pwd);
-        char *cwd = d_path(&pwd, path_buf, sizeof(path_buf));
+        char *cwd = d_path(&pwd, path_buf1, sizeof(path_buf1));
         if (!IS_ERR(cwd)) {
             allocated_full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
             if (allocated_full_path) {
                 snprintf(allocated_full_path, PATH_MAX, "%s/%s", cwd, filename);
                 full_path = allocated_full_path;
             } else {
-                full_path = filename; // 回退到原始文件名
+                full_path = filename;
             }
         } else {
-            full_path = filename; // d_path 出错时回退
+            full_path = filename;
         }
     } else {
-        // 非 AT_FDCWD 的 dfd 情况, 直接使用原始文件名
         full_path = filename;
     }
 
-    // 获取进程可执行文件路径
+    // 获取可执行文件路径
     if (current->mm && current->mm->exe_file) {
-        char *exe_path = d_path(&current->mm->exe_file->f_path, path_buf, sizeof(path_buf));
+        char *exe_path = d_path(&current->mm->exe_file->f_path, path_buf2, sizeof(path_buf2));
         if (!IS_ERR(exe_path)) {
             comm = exe_path;
         }
     }
-
-    // 过滤特定路径 (日志目录)
-    if (strncmp(full_path, "/run/log/journal/", 17) == 0) {
-        goto cleanup; // 直接放行
-    }
-
+#if 0
     // 安全检查逻辑
     if (hx_str_list_contains(&hx_file_list, full_path)  // 如果是 白名单文件 && 不是系统白名单进程访问 -> HOOK
         && !hx_str_list_contains(&hx_process_list, comm)) {
         regs->ax = -EACCES; // 拒绝访问
-        ret = 1; // 跳过原系统调用
-        HX_LOG("[HOOK OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
-    } else {
-        HX_LOG("[PASS OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
+        ret = -1; // 跳过原系统调用
+        // [触发时间] [触发进程(全路径)] [该进程操作对象(文件)] [该进程操作内容] [本程序处理结果]
+        HX_LOG("程序 %s 尝试访问 %s 已拒绝\n", comm, full_path);
     }
+    // else {
+    //     HX_LOG("[PASS OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
+    // }
+#else
+    if (hx_str_list_contains(&hx_file_list, full_path)) {
+        if (hx_str_list_contains(&hx_process_list, comm)) {
+            HX_LOG("程序 %s 尝试访问 %s 已允许\n", comm, full_path);
+        } else {
+            regs->ax = -EACCES; // 拒绝访问
+            ret = 0; // 跳过原系统调用
+            // [触发时间] [触发进程(全路径)] [该进程操作对象(文件)] [该进程操作内容] [本程序处理结果]
+            HX_LOG("程序 %s 尝试访问 %s 已拒绝\n", comm, full_path);
+        }
+    }
+#endif
 
 cleanup:
     if (allocated_full_path) {
         kfree(allocated_full_path);
     }
     return ret;
-#undef PATH_STR_LEN_MAX
-}
-
-static int _pre_handler(struct kprobe* p, struct pt_regs* regs) {
-#define PATH_STR_LEN_MAX 256
-    char __user *filename_user = NULL;
-    char filename[PATH_STR_LEN_MAX];
-    char path[PATH_STR_LEN_MAX];
-
-    // x64 ABI: sys_openat 参数:
-    // int dfd = regs->di
-    // const char __user *filename = (const char __user *)regs->si
-    // int flags = regs->dx
-    // mode_t mode = regs->r10
-
-    char* full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
-    if (!full_path) 
-        return 0;
-
-    struct path pwd;
-    get_fs_pwd(current->fs, &pwd); // 获取当前工作目录
-
-    // 拼接路径（伪代码，实际需处理相对路径解析）
-    snprintf(full_path, PATH_MAX, "%s/%s", d_path(&pwd, path, PATH_STR_LEN_MAX), (char __user *)regs->si);
-    // printk("Full path: %s\n", full_path);
-    
-    // filename_user = (char __user *)regs->si;
-
-    // if (filename_user == NULL)
-    //     return 0;
-
-    // // 从用户态拷贝路径到内核空间
-    // if (strncpy_from_user(filename, filename_user, sizeof(filename)) <= 0)
-    //     return 0;
-
-    // filename[sizeof(filename) - 1] = 0;
-
-    // 过滤掉 /run/log/journal 路径，直接放行
-    if (strncmp(full_path, "/run/log/journal/", strlen("/run/log/journal/")) == 0) {
-        return 0;
-    }
-
-    pid_t pid = current->pid;
-    const char* comm = current->mm 
-        ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-        : "null";
-
-    if (hx_str_list_contains(&hx_file_list, full_path) && !hx_str_list_contains(&hx_process_list, comm)) {
-        // 这里返回 -EACCES 拒绝打开文件
-        regs->ax = -EACCES;
-        // 让 kprobe 跳过原函数，直接返回错误
-        HX_LOG("[HOOK OPEN]: PID = %d, src = %s | try open: %s\n", pid, comm, full_path);
-        kfree(full_path);
-        return 1; 
-    } else {
-        HX_LOG("[PASS OPEN]: PID = %d, src = %s | opened: %s\n", pid, comm, full_path);
-    }
-    kfree(full_path);
-    return 0;
 #undef PATH_STR_LEN_MAX
 }
 

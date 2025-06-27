@@ -1,4 +1,3 @@
-#pragma once
 /*
  * Copyright (C) 2025 Heng_Xin. All rights reserved.
  *

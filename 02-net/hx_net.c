@@ -1,3 +1,4 @@
+#include "../hx/hx_linux_inc.h"
 #include "../hx/hx_log.h"
 
 MODULE_LICENSE("GPL");
@@ -140,6 +141,10 @@ int hx_config_load(void) {
     return 0;
 }
 
+int hx_is_work_time(void) {
+    return 1;
+}
+
 static struct nf_hook_ops out_nfho; // net filter hook option struct
 
 unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_hook_state *state) {
@@ -159,51 +164,50 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                 // src: 192.168.0.202, sport: 57572 dst: 121.36.16.180 dport: 47873
                 char path[PATH_STR_LEN_MAX] = {0};
                 // 如果目标 ip:端口 是黑名单内容, 则禁止
-                if (hx_addr_list_contains(nh->daddr, th->dest)) {
-                    HX_LOG("[HOOK-TCP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
-                        NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
-                        task_pid_nr(current),                      // pid 
-                        current->mm 
-                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-                            : "null",
-                        NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
-                    );
+                // @todo 判断上班时间区间
+                if (hx_is_work_time() && hx_addr_list_contains(nh->daddr, th->dest)) {
+                    if (current->mm) {
+                        HX_LOG("程序 %s 尝试访问 %u.%u.%u.%u:%d 已拦截\n", 
+                            d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX), // 程序所在全路径
+                            NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
+                        );
+                    }
                     return NF_DROP;
-                } else {
-                    HX_LOG("[PASS-TCP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
-                        NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
-                        task_pid_nr(current),                      // pid 
-                        current->mm 
-                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-                            : "null",
-                        NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
-                    );
-                }
+                } 
+                // else {
+                //     HX_LOG("[PASS-TCP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                //         NIPQUAD(nh->saddr), ntohs(th->source),     // 源ip - 端口
+                //         task_pid_nr(current),                      // pid 
+                //         current->mm 
+                //             ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                //             : "null",
+                //         NIPQUAD(nh->daddr), ntohs(th->dest)       // 目标ip - 端口
+                //     );
+                // }
                 break;
             }
             case IPPROTO_UDP: {
                 struct udphdr* uh = udp_hdr(skb);
                 char path[PATH_STR_LEN_MAX] = {0};
-                if (hx_addr_list_contains(nh->daddr, uh->dest)) {
-                    HX_LOG("[HOOK-UDP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
-                        NIPQUAD(nh->saddr), ntohs(uh->source),     // 源ip - 端口
-                        task_pid_nr(current),                      // pid 
-                        current->mm 
-                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-                            : "null",
-                        NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
-                    );
+                if (hx_is_work_time() && hx_addr_list_contains(nh->daddr, uh->dest)) {
+                    if (current->mm) {
+                        HX_LOG("程序 %s 尝试访问 %u.%u.%u.%u:%d 已拦截\n", 
+                            d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX), // 程序所在全路径
+                            NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
+                        );
+                    }
                     return NF_DROP;
-                } else {
-                    HX_LOG("[PASS-UDP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
-                        NIPQUAD(nh->saddr), ntohs(uh->source),     // 源ip - 端口
-                        task_pid_nr(current),                      // pid 
-                        current->mm 
-                            ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
-                            : "null",
-                        NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
-                    );
                 }
+                // else {
+                //     HX_LOG("[PASS-UDP] %u.%u.%u.%u:%d (pid = %u, src = %s) -> %u.%u.%u.%u:%d\n", 
+                //         NIPQUAD(nh->saddr), ntohs(uh->source),     // 源ip - 端口
+                //         task_pid_nr(current),                      // pid 
+                //         current->mm 
+                //             ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+                //             : "null",
+                //         NIPQUAD(nh->daddr), ntohs(uh->dest)       // 目标ip - 端口
+                //     );
+                // }
                 break;
             }
             case IPPROTO_IPV6: {
