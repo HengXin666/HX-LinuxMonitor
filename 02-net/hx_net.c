@@ -3,10 +3,6 @@
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
 
-// 文件 io
-#define HX_LOG_FILE_PATH "/home/kylin/.log/hx.log"
-#define HX_CONFIG_FILE_PATH "/home/kylin/.config/hx.config"
-
 // 可存储 ipv4/ipv6 - 端口 的数据结构
 struct hx_addrinfo {
     __be32 addr;
@@ -62,12 +58,12 @@ int hx_addr_list_contains(__be32 addr, uint16_t port) {
 
 int hx_config_load(void) {
     static struct file* fp;
-    int err = hx_ensure_directory_exists("/home/kylin/.config", 0755);
+    int err = hx_ensure_directory_exists("/hx/config", 0755);
     if (err < 0) {
         printk("open log dir, err = %d\n", err);
         return -1;
     }
-    fp = filp_open(HX_CONFIG_FILE_PATH, O_RDONLY | O_CREAT, 0644);
+    fp = filp_open("/hx/config/hx_net.config", O_RDONLY | O_CREAT, 0644);
     if (IS_ERR(fp)) {
         int ret = PTR_ERR(fp);
         printk("open log failed, err = %d\n", ret);
@@ -254,7 +250,7 @@ static int __init init_func(void) {
         return -1;
     }
     printk("run hx_net...\n");
-    if (hx_log_init() < 0) {
+    if (hx_log_init("/hx/log", "hx_net.log") < 0) {
         printk("error log init");
         return -1;
     }

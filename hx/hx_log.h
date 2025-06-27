@@ -25,14 +25,23 @@
 static struct file* hx_log_fp;
 static DEFINE_SPINLOCK(hx_log_lock); // 定义全局锁
 
-int hx_log_init(void) {
+/**
+ * @brief 
+ * 
+ * @param path /hx/log
+ * @param file /hx.log
+ * @return int 
+ */
+int hx_log_init(const char* path, const char* file) {
     // 在hx_log_init中添加目录创建
-    int err = hx_ensure_directory_exists("/home/kylin/.log", 0755);
+    int err = hx_ensure_directory_exists(path, 0755);
     if (err < 0) {
         printk("open log dir, err = %d\n", err);
         return -1;
     }
-    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT | O_APPEND, 0644);
+    char file_path[96] ={0};
+    snprintf(file_path, sizeof(file_path), "%s/%s", path, file);
+    hx_log_fp = filp_open(file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (IS_ERR(hx_log_fp)) {
         int ret = PTR_ERR(hx_log_fp);
         printk("open log failed, err = %d\n", ret);
