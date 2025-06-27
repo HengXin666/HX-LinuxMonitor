@@ -56,23 +56,60 @@ include_directories(include)
 
 file(GLOB_RECURSE src_files CONFIGURE_DEPENDS 
     src/*.cpp
-    include/*.h
-    include/*.hpp
 )
 
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets)
 
-add_executable(${projectName}
-    ${src_files}
-)
+# 遍历每个 .cpp 文件, 生成可执行文件
+foreach(TEST_FILE ${src_files})
+    # 提取 .cpp 文件名作为目标名 (去掉路径和扩展名)
+    get_filename_component(TEST_NAME ${TEST_FILE} NAME_WE)
 
-target_compile_features(${projectName} PUBLIC cxx_std_20)
+    # 获取 .cpp 文件所在的目录 (相对路径)
+    get_filename_component(TEST_DIR ${TEST_FILE} DIRECTORY)
+    
+    # 获取 TEST_DIR 的最后一级目录名 (即父文件夹名)
+    get_filename_component(PARENT_DIR ${TEST_DIR} NAME)
+    
+    # 添加测试可执行文件
+    add_executable(${TEST_NAME} ${TEST_FILE})
 
-target_link_libraries(${projectName}
-    PRIVATE Qt5::Core
-    PRIVATE Qt5::Gui
-    PRIVATE Qt5::Widgets
-)
+    # 示例: 添加std线程依赖
+    target_link_libraries(${TEST_NAME}
+        PRIVATE Qt5::Core
+        PRIVATE Qt5::Gui
+        PRIVATE Qt5::Widgets
+    )
+
+    # 设置 FOLDER 属性, 使其按所在 demo 子目录分类
+    set_target_properties(${TEST_NAME} PROPERTIES FOLDER qt/${PARENT_DIR})
+
+    set_target_properties(${TEST_NAME} PROPERTIES
+        ${BUNDLE_ID_OPTION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+        MACOSX_BUNDLE OFF
+        WIN32_EXECUTABLE OFF # 这里需要为 OFF 才可以让vscode在控制台中输出...
+    )
+
+    include(GNUInstallDirs)
+    install(TARGETS ${TEST_NAME}
+        BUNDLE DESTINATION .
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+
+    set_target_properties(${TEST_NAME} PROPERTIES FOLDER qt/${PARENT_DIR})
+
+    # 使用 Address Sanitizer
+    if(HX_DEBUG_BY_ADDRESS_SANITIZER)
+        target_compile_options(${TEST_NAME} PRIVATE
+        $<$<CONFIG:Debug>:-fsanitize=address>)
+
+        target_link_options(${TEST_NAME} PRIVATE
+            $<$<CONFIG:Debug>:-fsanitize=address>)
+    endif()
+endforeach()
 
 set(QT_QML_GENERATE_QMLLS_INI ON)
 
@@ -100,44 +137,6 @@ set(QT_QML_GENERATE_QMLLS_INI ON)
 # find_package(Qt6 REQUIRED COMPONENTS Network)
 # target_link_libraries(${projectName} PRIVATE Qt::Network)
 
-if (WIN32)
-    # 解决路径问题, 确保 windeployqt.exe 存在
-    set(QT_BIN_DIR "${QT_COMPILER_PATH}/bin")
-    if(NOT EXISTS "${QT_BIN_DIR}/windeployqt.exe")
-        message(FATAL_ERROR "Error: windeployqt.exe not found in ${QT_BIN_DIR}")
-    endif()
-
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Debug")
-        add_custom_command(TARGET ${projectName} POST_BUILD
-            COMMAND "${QT_BIN_DIR}/windeployqt.exe" --debug "$<TARGET_FILE:${projectName}>"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/Debug"
-        )
-    elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
-        file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/Release")
-        add_custom_command(TARGET ${projectName} POST_BUILD
-            COMMAND "${QT_BIN_DIR}/windeployqt.exe" --release "$<TARGET_FILE:${projectName}>"
-            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
-        )
-    endif()
-endif()
-
-set_target_properties(${projectName} PROPERTIES
-    ${BUNDLE_ID_OPTION}
-    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
-    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
-    MACOSX_BUNDLE OFF
-    WIN32_EXECUTABLE OFF # 这里需要为 OFF 才可以让vscode在控制台中输出...
-)
-
-include(GNUInstallDirs)
-install(TARGETS ${projectName}
-    BUNDLE DESTINATION .
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-
-set_target_properties(${projectName} PROPERTIES FOLDER qt/${PARENT_DIR})
 
 # 将include目录添加到HXTest库的公共包含目录中
 # target_include_directories(HXTest PUBLIC include)
