@@ -12,6 +12,8 @@ build/
 modules.*
 Module.*
 
+!ko/*
+
 # Prerequisites
 *.d
 
