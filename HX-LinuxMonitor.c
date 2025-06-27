@@ -19,6 +19,11 @@
 #include <linux/init_task.h> // init_user_ns
 #include <linux/dcache.h>
 #include <linux/uaccess.h>
+#include <linux/ktime.h>
+#include <linux/timer.h>
+#include <linux/timex.h>
+#include <linux/rtc.h>
+#include <linux/timekeeping.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A Simple Hello Packet Module");
@@ -96,7 +101,7 @@ int hx_log_init(void) {
         printk("open log dir, err = %d\n", err);
         return -1;
     }
-    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT, 0644);
+    hx_log_fp = filp_open("/home/kylin/.log/hx.log", O_WRONLY | O_CREAT | O_SYNC, 0644);
     if (IS_ERR(hx_log_fp)) {
         int ret = PTR_ERR(hx_log_fp);
         printk("open log failed, err = %d\n", ret);
@@ -150,15 +155,27 @@ void hx_log(const char* msg) {
     } while (0)
 #else
 void HX_LOG(const char *fmt, ...) {
-    char buf[256] = {0};  // 增加缓冲区大小
+    char buf[128] = {0};
+    char msg[196] = {0};
     va_list args;
     va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args); // 使用更安全的vsnprintf
+    vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
-    
+
+    ktime_t kt = ktime_get_real(); // 获取 UTC 时间
+    struct timespec64 ts = ktime_to_timespec64(kt);
+    struct tm tm;
+
+    ts.tv_sec += 8 * 60 * 60; // UTC+8
+    time64_to_tm(ts.tv_sec, 0, &tm);
+
+    snprintf(msg, sizeof(msg), "[%04ld-%02d-%02d %02d:%02d:%02d]: %s",
+        tm.tm_year + 1900L, tm.tm_mon + 1, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec, buf);
+
     // 同时写入内核日志和自定义文件
-    printk("%s", buf);    // 内核日志
-    hx_log(buf);          // 自定义文件
+    // printk("%s", msg);    // 内核日志
+    hx_log(msg);          // 自定义文件
 }
 #endif
 
