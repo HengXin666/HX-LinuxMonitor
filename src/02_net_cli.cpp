@@ -19,6 +19,7 @@
 #include <QInputDialog>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QCloseEvent>
 
 class PasswordDialog : public QDialog {
     Q_OBJECT
@@ -27,7 +28,7 @@ public:
         setWindowTitle("输入sudo密码");
         QVBoxLayout *layout = new QVBoxLayout(this);
         
-        layout->addWidget(new QLabel("需要root权限加载内核模块:"));
+        layout->addWidget(new QLabel("需要root权限:"));
         passwordEdit = new QLineEdit();
         passwordEdit->setEchoMode(QLineEdit::Password);
         layout->addWidget(passwordEdit);
@@ -57,6 +58,29 @@ public:
         setupConnections();
         setupLogWatcher();
         loadConfig();
+    }
+
+    ~MainWindow() {
+        // 清理资源
+        if (logWatcher) {
+            delete logWatcher;
+        }
+    }
+
+protected:
+    void closeEvent(QCloseEvent *event) override {
+        // 检查模块是否加载
+        if (isModuleLoaded()) {
+            QMessageBox::StandardButton reply;
+            reply = QMessageBox::question(this, "确认退出", 
+                "内核模块仍在运行，是否卸载模块并退出？",
+                QMessageBox::Yes | QMessageBox::No);
+            
+            if (reply == QMessageBox::Yes) {
+                unloadKernelModule(false);  // 尝试卸载但不强制
+            }
+        }
+        event->accept();
     }
 
 private slots:
@@ -136,21 +160,51 @@ private slots:
                          .arg(password)
                          .arg(configPath);
         process.start("bash", QStringList() << "-c" << command);
+        process.waitForFinished();
         
-        if (!process.waitForFinished()) {
-            logOutput->append("加载内核模块失败: " + process.errorString());
+        if (process.exitCode() != 0) {
+            logOutput->append("加载内核模块失败: " + process.readAllStandardError());
+        } else {
+            logOutput->append("内核模块 hx_net.ko 已加载");
+            moduleLoaded = true;
+        }
+    }
+    
+    void unloadKernelModule(bool manual = true) {
+        if (!isModuleLoaded()) {
+            if (manual) {
+                QMessageBox::information(this, "提示", "模块未加载");
+            }
             return;
         }
         
+        PasswordDialog dialog(this);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        
+        QString password = dialog.getPassword();
+        if (password.isEmpty()) {
+            QMessageBox::warning(this, "警告", "密码不能为空");
+            return;
+        }
+        
+        QProcess process;
+        QString command = QString("echo '%1' | sudo -S rmmod hx_net.ko")
+                         .arg(password);
+        process.start("bash", QStringList() << "-c" << command);
+        process.waitForFinished();
+        
         if (process.exitCode() != 0) {
-            logOutput->append("加载内核模块错误: " + process.readAllStandardError());
+            logOutput->append("卸载内核模块失败: " + process.readAllStandardError());
         } else {
-            logOutput->append("内核模块 hx_net.ko 已加载");
+            logOutput->append("内核模块 hx_net.ko 已卸载");
+            moduleLoaded = false;
         }
     }
     
     void checkLogChanges() {
-        // 先尝试读取应用日志
+        // 尝试读取应用日志
         QString logPath = QDir::homePath() + "/log/hx_net.log";
         QFile appLogFile(logPath);
         if (appLogFile.exists()) {
@@ -193,9 +247,11 @@ private:
     QPushButton *addButton;
     QPushButton *removeButton;
     QPushButton *loadModuleButton;
+    QPushButton *unloadModuleButton;
     QTextEdit *logOutput;
     QString lastLogContent;
     QFileSystemWatcher *logWatcher;
+    bool moduleLoaded = false;
 
     void setupUI() {
         QWidget *centralWidget = new QWidget(this);
@@ -214,15 +270,20 @@ private:
         removeButton = new QPushButton("删除");
         inputLayout->addWidget(removeButton);
         
-        loadModuleButton = new QPushButton("加载内核模块");
-        inputLayout->addWidget(loadModuleButton);
-        
         mainLayout->addLayout(inputLayout);
         
         // 条目列表
         entryList = new QListWidget();
         entryList->setSelectionMode(QAbstractItemView::ExtendedSelection);
         mainLayout->addWidget(entryList);
+        
+        // 模块控制按钮
+        QHBoxLayout *moduleLayout = new QHBoxLayout();
+        loadModuleButton = new QPushButton("加载内核模块");
+        unloadModuleButton = new QPushButton("卸载内核模块");
+        moduleLayout->addWidget(loadModuleButton);
+        moduleLayout->addWidget(unloadModuleButton);
+        mainLayout->addLayout(moduleLayout);
         
         // 日志输出区域
         logOutput = new QTextEdit();
@@ -240,6 +301,7 @@ private:
         connect(addButton, &QPushButton::clicked, this, &MainWindow::addEntry);
         connect(removeButton, &QPushButton::clicked, this, &MainWindow::removeEntry);
         connect(loadModuleButton, &QPushButton::clicked, this, &MainWindow::loadKernelModule);
+        connect(unloadModuleButton, &QPushButton::clicked, this, &MainWindow::unloadKernelModule);
     }
     
     void setupLogWatcher() {
@@ -297,6 +359,14 @@ private:
         // 简单的IP(:端口)格式验证
         QRegExp ipPortRegex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?$");
         return ipPortRegex.exactMatch(input);
+    }
+    
+    bool isModuleLoaded() {
+        QProcess process;
+        process.start("lsmod");
+        process.waitForFinished();
+        QString output = process.readAllStandardOutput();
+        return output.contains("hx_net");
     }
 };
 
