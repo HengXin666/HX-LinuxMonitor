@@ -19,6 +19,7 @@ static struct kprobe kp = {
 // 数据
 struct hx_str_node {
     const char* data;
+    size_t n;
     struct hx_str_node* next;
 };
 
@@ -28,9 +29,13 @@ static struct hx_str_node hx_process_list;
 // 头插法
 void hx_str_list_push_front(struct hx_str_node* head, const char* data) {
     struct hx_str_node* node = (struct hx_str_node*)kmalloc(sizeof(struct hx_str_node), GFP_KERNEL);
+    size_t n = strlen(data) + 1;
+    char* str = (char *)kmalloc(sizeof(char) * n, GFP_KERNEL);
+    strlcpy(str, data, n);
     node->next = head->next;
     head->next = node;
-    node->data = data;
+    node->data = str;
+    node->n = n - 1;
 }
 
 // 清空链表
@@ -50,7 +55,8 @@ int hx_str_list_contains(struct hx_str_node* head, const char* data) {
     struct hx_str_node* node = head->next;
     size_t n = strlen(data);
     for (; node; node = node->next) {
-        if (strncmp(node->data, data, n) == 0) {
+        if (node->n == n && strncmp(node->data, data, n) == 0) {
+            // HX_LOG("contains: %s == %s", node->data, data);
             return 1;
         }
     }
@@ -166,7 +172,7 @@ int hx_config_load_file(void) {
         }
 
         // 直接使用整行作为文件路径
-        printk("loaded config - file path: %s\n", line);
+        printk("loaded config - file path: %s\n", line); // loaded config - file path: /home/loli/code/HX-LinuxMonitor/__tmp__c.md
         
         // 将文件路径添加到链表
         hx_str_list_push_front(&hx_file_list, line);
@@ -179,45 +185,137 @@ int hx_config_load_file(void) {
     return 0;
 }
 
-static int pre_handler(struct kprobe *p, struct pt_regs *regs) {
+static int pre_handler(struct kprobe* p, struct pt_regs* regs) {
+#define PATH_STR_LEN_MAX 256
+    int dfd = (int)regs->di; // openat 的 dfd 参数
+    char __user *filename_user = (char __user *)regs->si;
+    char filename[PATH_STR_LEN_MAX];
+    char path_buf[PATH_STR_LEN_MAX]; // 用于 d_path 的缓冲区
+    char *full_path = NULL;
+    char *allocated_full_path = NULL;
+    pid_t pid = current->pid;
+    const char* comm = "null";
+    int ret = 0;
+
+    // 复制用户空间的文件名
+    if (strncpy_from_user(filename, filename_user, sizeof(filename)) <= 0) {
+        return 0;
+    }
+    filename[sizeof(filename) - 1] = '\0';
+
+    // 处理路径 仅支持绝对路径或 AT_FDCWD 的相对路径
+    if (filename[0] == '/') {
+        // 绝对路径直接使用
+        full_path = filename;
+    } else if (dfd == AT_FDCWD) {
+        // 相对路径 + 当前工作目录
+        struct path pwd;
+        get_fs_pwd(current->fs, &pwd);
+        char *cwd = d_path(&pwd, path_buf, sizeof(path_buf));
+        if (!IS_ERR(cwd)) {
+            allocated_full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
+            if (allocated_full_path) {
+                snprintf(allocated_full_path, PATH_MAX, "%s/%s", cwd, filename);
+                full_path = allocated_full_path;
+            } else {
+                full_path = filename; // 回退到原始文件名
+            }
+        } else {
+            full_path = filename; // d_path 出错时回退
+        }
+    } else {
+        // 非 AT_FDCWD 的 dfd 情况, 直接使用原始文件名
+        full_path = filename;
+    }
+
+    // 获取进程可执行文件路径
+    if (current->mm && current->mm->exe_file) {
+        char *exe_path = d_path(&current->mm->exe_file->f_path, path_buf, sizeof(path_buf));
+        if (!IS_ERR(exe_path)) {
+            comm = exe_path;
+        }
+    }
+
+    // 过滤特定路径 (日志目录)
+    if (strncmp(full_path, "/run/log/journal/", 17) == 0) {
+        goto cleanup; // 直接放行
+    }
+
+    // 安全检查逻辑
+    if (hx_str_list_contains(&hx_file_list, full_path)  // 如果是 白名单文件 && 不是系统白名单进程访问 -> HOOK
+        && !hx_str_list_contains(&hx_process_list, comm)) {
+        regs->ax = -EACCES; // 拒绝访问
+        ret = 1; // 跳过原系统调用
+        HX_LOG("[HOOK OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
+    } else {
+        HX_LOG("[PASS OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
+    }
+
+cleanup:
+    if (allocated_full_path) {
+        kfree(allocated_full_path);
+    }
+    return ret;
+#undef PATH_STR_LEN_MAX
+}
+
+static int _pre_handler(struct kprobe* p, struct pt_regs* regs) {
+#define PATH_STR_LEN_MAX 256
     char __user *filename_user = NULL;
-    char filename[256];
+    char filename[PATH_STR_LEN_MAX];
+    char path[PATH_STR_LEN_MAX];
 
     // x64 ABI: sys_openat 参数:
     // int dfd = regs->di
     // const char __user *filename = (const char __user *)regs->si
     // int flags = regs->dx
     // mode_t mode = regs->r10
-    filename_user = (char __user *)regs->si;
 
-    if (filename_user == NULL)
+    char* full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
+    if (!full_path) 
         return 0;
 
-    // 从用户态拷贝路径到内核空间
-    if (strncpy_from_user(filename, filename_user, sizeof(filename)) <= 0)
-        return 0;
+    struct path pwd;
+    get_fs_pwd(current->fs, &pwd); // 获取当前工作目录
 
-    filename[sizeof(filename) - 1] = 0;
+    // 拼接路径（伪代码，实际需处理相对路径解析）
+    snprintf(full_path, PATH_MAX, "%s/%s", d_path(&pwd, path, PATH_STR_LEN_MAX), (char __user *)regs->si);
+    // printk("Full path: %s\n", full_path);
+    
+    // filename_user = (char __user *)regs->si;
+
+    // if (filename_user == NULL)
+    //     return 0;
+
+    // // 从用户态拷贝路径到内核空间
+    // if (strncpy_from_user(filename, filename_user, sizeof(filename)) <= 0)
+    //     return 0;
+
+    // filename[sizeof(filename) - 1] = 0;
 
     // 过滤掉 /run/log/journal 路径，直接放行
-    if (strncmp(filename, "/run/log/journal/", strlen("/run/log/journal/")) == 0) {
+    if (strncmp(full_path, "/run/log/journal/", strlen("/run/log/journal/")) == 0) {
         return 0;
     }
 
     pid_t pid = current->pid;
-    const char *comm = current->comm;
+    const char* comm = current->mm 
+        ? d_path(&current->mm->exe_file->f_path, path, PATH_STR_LEN_MAX) // 程序所在全路径
+        : "null";
 
-    if (hx_str_list_contains(&hx_file_list, filename) && !hx_str_list_contains(&hx_process_list, comm)) {
+    if (hx_str_list_contains(&hx_file_list, full_path) && !hx_str_list_contains(&hx_process_list, comm)) {
         // 这里返回 -EACCES 拒绝打开文件
         regs->ax = -EACCES;
         // 让 kprobe 跳过原函数，直接返回错误
-        HX_LOG("[HOOK OPEN]: PID = %d, src = %s try open: %s\n", pid, comm, filename);
+        HX_LOG("[HOOK OPEN]: PID = %d, src = %s | try open: %s\n", pid, comm, full_path);
+        kfree(full_path);
         return 1; 
     } else {
-        HX_LOG("[PASS OPEN]: PID = %d, src = %s opened: %s\n", pid, comm, filename);
+        HX_LOG("[PASS OPEN]: PID = %d, src = %s | opened: %s\n", pid, comm, full_path);
     }
-
+    kfree(full_path);
     return 0;
+#undef PATH_STR_LEN_MAX
 }
 
 static int __init kprobe_init(void) {

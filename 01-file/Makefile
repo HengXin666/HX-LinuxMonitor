@@ -42,4 +42,6 @@ debug:
 	@dmesg | tail -n 5
 info:
 	@dmesg -w
+hook:
+	@dmesg -w | grep -n "HOOK"
 .PHONY:all install clean hx

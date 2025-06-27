@@ -4,6 +4,9 @@
         "inet.h": "c",
         "timer.h": "c",
         "rtc.h": "c",
-        "ktime.h": "c"
+        "ktime.h": "c",
+        "hx_dir_tools.h": "c",
+        "hx_linux_inc.h": "c",
+        "module.h": "c"
     }
 }
