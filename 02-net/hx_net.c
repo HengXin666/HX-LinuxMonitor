@@ -57,17 +57,17 @@ int hx_addr_list_contains(__be32 addr, uint16_t port) {
     return 0;
 }
 
-int hx_config_load(void) {
+int hx_config_load_url(void) {
     static struct file* fp;
     int err = hx_ensure_directory_exists("/hx/config", 0755);
     if (err < 0) {
-        printk("open log dir, err = %d\n", err);
+        printk("open config dir, err = %d\n", err);
         return -1;
     }
     fp = filp_open("/hx/config/hx_net_url.config", O_RDONLY | O_CREAT, 0644);
     if (IS_ERR(fp)) {
         int ret = PTR_ERR(fp);
-        printk("open log failed, err = %d\n", ret);
+        printk("open config failed, err = %d\n", ret);
         return -1;
     }
     // 解析, 按照 : 分割 (ip:端口)
@@ -141,8 +141,153 @@ int hx_config_load(void) {
     return 0;
 }
 
+#define MAX_WORK_TIMES 16
+struct hx_work_time {
+    char begin_hour;
+    char begin_min;
+    char end_hour;
+    char end_min;
+};
+
+static struct hx_work_time work_times[MAX_WORK_TIMES];
+static int work_time_count = 0;
+
 int hx_is_work_time(void) {
-    return 1;
+    ktime_t kt = ktime_get_real(); // 获取 UTC 时间
+    struct timespec64 ts = ktime_to_timespec64(kt);
+    struct tm tm;
+
+    ts.tv_sec += 8 * 60 * 60; // UTC+8
+    time64_to_tm(ts.tv_sec, 0, &tm);
+
+    int now_minutes = tm.tm_hour * 60 + tm.tm_min;
+
+    for (int i = 0; i < work_time_count; ++i) {
+        int begin_minutes = work_times[i].begin_hour * 60 + work_times[i].begin_min;
+        int end_minutes = work_times[i].end_hour * 60 + work_times[i].end_min;
+
+        // 判断当前时间是否在区间内 (闭区间)
+        if (now_minutes >= begin_minutes && now_minutes <= end_minutes) {
+            return 1; // 在上班时间段内
+        }
+    }
+    return 0; // 不在任何上班时间段
+}
+
+static bool parse_time_str(const char *time_str, char *hour, char *min) {
+    // 格式 "HH:MM"，简单检查
+    if (strlen(time_str) != 5 || time_str[2] != ':')
+        return false;
+    if (time_str[0] < '0' || time_str[0] > '2') 
+        return false;
+    if (time_str[1] < '0' || time_str[1] > '9') 
+        return false;
+    if (time_str[3] < '0' || time_str[3] > '5') 
+        return false;
+    if (time_str[4] < '0' || time_str[4] > '9') 
+        return false;
+
+    *hour = (time_str[0] - '0') * 10 + (time_str[1] - '0');
+    *min  = (time_str[3] - '0') * 10 + (time_str[4] - '0');
+
+    if (*hour > 24) 
+        return false;
+    if (*min > 59) 
+        return false;
+    if (*hour == 24 && *min != 0) 
+        return false; // 24:00合法，其余非法
+    return true;
+}
+
+int hx_config_load_work_time(void) {
+    struct file *fp = NULL;
+    loff_t pos = 0;
+    char *buf = NULL;
+    ssize_t read_bytes;
+    int ret = 0;
+
+    fp = filp_open("/hx/config/hx_net_time.config", O_RDONLY, 0);
+    if (IS_ERR(fp)) {
+        printk("打开工作时间配置文件失败\n");
+        return PTR_ERR(fp);
+    }
+
+    // 文件大小限制读取 4k（假设不大）
+    buf = kzalloc(4096, GFP_KERNEL);
+    if (!buf) {
+        filp_close(fp, NULL);
+        return -ENOMEM;
+    }
+
+    read_bytes = kernel_read(fp, buf, 4095, &pos);
+    filp_close(fp, NULL);
+    if (read_bytes <= 0) {
+        printk("读取工作时间配置文件失败或为空\n");
+        kfree(buf);
+        return -EIO;
+    }
+    buf[read_bytes] = '\0';
+
+    // 清空已有数据
+    work_time_count = 0;
+
+    // 按行解析
+    char *line = buf;
+    while (line && *line && work_time_count < MAX_WORK_TIMES) {
+        char *newline = strchr(line, '\n');
+        if (newline) {
+            *newline = '\0';
+        }
+
+        // 跳过空行或注释
+        if (*line == '\0' || *line == '#') {
+            line = newline ? newline + 1 : NULL;
+            continue;
+        }
+
+        // 格式: HH:MM~HH:MM
+        char *sep = strchr(line, '~');
+        if (!sep) {
+            printk("格式错误，缺少 ~: %s\n", line);
+            line = newline ? newline + 1 : NULL;
+            continue;
+        }
+
+        *sep = '\0';
+        const char *begin_str = line;
+        const char *end_str = sep + 1;
+
+        char bh, bm, eh, em;
+        if (!parse_time_str(begin_str, &bh, &bm) || !parse_time_str(end_str, &eh, &em)) {
+            printk("时间格式错误: %s~%s\n", begin_str, end_str);
+            line = newline ? newline + 1 : NULL;
+            continue;
+        }
+
+        // 简单合法性校验：开始时间 < 结束时间（分钟数比较）
+        int begin_total = bh * 60 + bm;
+        int end_total = eh * 60 + em;
+        if (begin_total >= end_total) {
+            printk("开始时间必须小于结束时间: %s~%s\n", begin_str, end_str);
+            line = newline ? newline + 1 : NULL;
+            continue;
+        }
+
+        // 保存结果
+        work_times[work_time_count].begin_hour = bh;
+        work_times[work_time_count].begin_min = bm;
+        work_times[work_time_count].end_hour = eh;
+        work_times[work_time_count].end_min = em;
+        work_time_count++;
+
+        line = newline ? newline + 1 : NULL;
+    }
+
+    kfree(buf);
+
+    printk("共加载 %d 个工作时间段\n", work_time_count);
+
+    return ret;
 }
 
 static struct nf_hook_ops out_nfho; // net filter hook option struct
@@ -153,7 +298,7 @@ unsigned int hook_sent_request(void *priv, struct sk_buff *skb, const struct nf_
                       ((unsigned char *)&addr)[1], \
                       ((unsigned char *)&addr)[2], \
                       ((unsigned char *)&addr)[3]
-
+    
     // 如果是ip协议
     if ((skb->protocol) == htons(ETH_P_IP)) {
         struct iphdr* nh = ip_hdr(skb);
@@ -249,8 +394,12 @@ static int __init init_func(void) {
     out_nfho.pf = PF_INET;
     out_nfho.priority = NF_IP_PRI_FIRST;
     
-    if (hx_config_load() < 0) {
-        printk("error config init");
+    if (hx_config_load_url() < 0) {
+        printk("error url config init");
+        return -1;
+    }
+    if (hx_config_load_work_time() < 0) {
+        printk("error work_time config init");
         return -1;
     }
     printk("run hx_net...\n");

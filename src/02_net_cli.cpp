@@ -16,6 +16,7 @@
 #include <QTextStream>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QCloseEvent>
 #include <unistd.h>
 
 class MainWindow : public QMainWindow {
@@ -35,6 +36,21 @@ public:
         setupLogWatcher();
     }
 
+protected:
+    void closeEvent(QCloseEvent *event) override {
+        if (isModuleLoaded()) {
+            QMessageBox::StandardButton reply;
+            reply = QMessageBox::question(this, "确认退出", 
+                "内核模块仍在运行，是否卸载模块并退出？",
+                QMessageBox::Yes | QMessageBox::No);
+            
+            if (reply == QMessageBox::Yes) {
+                unloadKernelModule(false);
+            }
+        }
+        event->accept();
+    }
+
 private:
     QLineEdit *ipEdit;
     QLineEdit *timeEdit;
@@ -42,6 +58,14 @@ private:
     QListWidget *timeList;
     QTextEdit *logView;
     QString lastLog;
+
+    bool isModuleLoaded() {
+        QProcess process;
+        process.start("lsmod");
+        process.waitForFinished();
+        QString output = process.readAllStandardOutput();
+        return output.contains("hx_net");
+    }
 
     // 时间格式校验和解析
     static bool parseTime(QString const &timeStr, int &minutes) {
@@ -227,14 +251,29 @@ private:
         connect(saveBtn, &QPushButton::clicked, this, &MainWindow::saveConfig);
         connect(loadBtn, &QPushButton::clicked, this, [=]() {
             QProcess::execute(
-                "insmod hx_net.ko url_path=/hx/config/hx_net_url.config "
-                "time_path=/hx/config/hx_net_time.config");
+                "insmod hx_net.ko");
             logView->append("[操作] 模块加载命令已执行");
         });
-        connect(unloadBtn, &QPushButton::clicked, this, [=]() {
-            QProcess::execute("rmmod hx_net.ko");
-            logView->append("[操作] 模块卸载命令已执行");
-        });
+        connect(unloadBtn, &QPushButton::clicked, this, &MainWindow::unloadKernelModule);
+    }
+
+    void unloadKernelModule(bool manual = true) {
+        if (!isModuleLoaded()) {
+            if (manual) {
+                QMessageBox::information(this, "提示", "模块未加载");
+            }
+            return;
+        }
+        
+        QProcess process;
+        process.start("rmmod", QStringList() << "hx_net.ko");
+        process.waitForFinished();
+        
+        if (process.exitCode() != 0) {
+            logView->append("卸载内核模块失败: " + process.readAllStandardError());
+        } else {
+            logView->append("内核模块 hx_net.ko 已卸载");
+        }
     }
 
     void sortTimeList() {
