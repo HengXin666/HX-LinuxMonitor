@@ -11,11 +11,6 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Heng_Xin");
 MODULE_DESCRIPTION("Kprobe example to intercept .c file open");
 
-// hook的目标函数
-static struct kprobe kp = {
-    .symbol_name = "do_sys_open",
-};
-
 // 数据
 struct hx_str_node {
     const char* data;
@@ -185,87 +180,51 @@ int hx_config_load_file(void) {
     return 0;
 }
 
-static int pre_handler(struct kprobe* p, struct pt_regs* regs) {
-#define PATH_STR_LEN_MAX 256
-    int dfd = (int)regs->di; // openat 的 dfd 参数
-    char __user *filename_user = (char __user *)regs->si;
-    char filename[PATH_STR_LEN_MAX] = {0};
-    char path_buf1[PATH_STR_LEN_MAX]; // 当前工作目录
-    char path_buf2[PATH_STR_LEN_MAX]; // 可执行文件路径
-    char *full_path = NULL;
-    char *allocated_full_path = NULL;
-    const char *comm = "null";
-    int ret = 0;
+#define MAX_PATH 256
+struct open_data {
+    bool deny;
+};
 
-    // 拷贝用户文件名
-    int name_len = strncpy_from_user(filename, filename_user, sizeof(filename));
-    if (name_len <= 0) {
-        HX_LOG("[HX_ERROR] 无法从用户空间复制文件名，地址: %px\n", filename_user);
-        goto cleanup;
+/* Entry handler: 决定是否拒绝，并在 data 中记录 */
+static int open_entry(struct kretprobe_instance *ri, struct pt_regs *regs) {
+    struct open_data *data = (struct open_data *)ri->data;
+    char user_path[MAX_PATH];
+
+    /* 从 regs->si（filename）拷贝用户空间路径 */
+    if (strncpy_from_user(user_path, (char __user *)regs->si, MAX_PATH) < 0) {
+        data->deny = false;
+        return 0;
     }
-    filename[sizeof(filename) - 1] = '\0';
+    user_path[MAX_PATH - 1] = '\0';
 
-    // 处理路径
-    if (filename[0] == '/') {
-        full_path = filename;
-    } else if (dfd == AT_FDCWD) {
-        struct path pwd;
-        get_fs_pwd(current->fs, &pwd);
-        char *cwd = d_path(&pwd, path_buf1, sizeof(path_buf1));
-        if (!IS_ERR(cwd)) {
-            allocated_full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
-            if (allocated_full_path) {
-                snprintf(allocated_full_path, PATH_MAX, "%s/%s", cwd, filename);
-                full_path = allocated_full_path;
-            } else {
-                full_path = filename;
-            }
-        } else {
-            full_path = filename;
-        }
+    /* 这里可以加更复杂的白名单/黑名单判断 */
+    if (hx_str_list_contains(&hx_file_list, user_path) &&
+        !hx_str_list_contains(&hx_process_list, current->comm)) {
+        data->deny = true;
+        HX_LOG("拦截: %s %s", user_path, current->comm);
     } else {
-        full_path = filename;
+        data->deny = false;
     }
-
-    // 获取可执行文件路径
-    if (current->mm && current->mm->exe_file) {
-        char *exe_path = d_path(&current->mm->exe_file->f_path, path_buf2, sizeof(path_buf2));
-        if (!IS_ERR(exe_path)) {
-            comm = exe_path;
-        }
-    }
-#if 0
-    // 安全检查逻辑
-    if (hx_str_list_contains(&hx_file_list, full_path)  // 如果是 白名单文件 && 不是系统白名单进程访问 -> HOOK
-        && !hx_str_list_contains(&hx_process_list, comm)) {
-        regs->ax = -EACCES; // 拒绝访问
-        ret = -1; // 跳过原系统调用
-        // [触发时间] [触发进程(全路径)] [该进程操作对象(文件)] [该进程操作内容] [本程序处理结果]
-        HX_LOG("程序 %s 尝试访问 %s 已拒绝\n", comm, full_path);
-    }
-    // else {
-    //     HX_LOG("[PASS OPEN] PID=%d, EXE=%s | PATH=%s\n", pid, comm, full_path);
-    // }
-#else
-    if (hx_str_list_contains(&hx_file_list, full_path)) {
-        if (hx_str_list_contains(&hx_process_list, comm)) {
-            HX_LOG("程序 %s 尝试访问 %s 已允许\n", comm, full_path);
-        } else {
-            regs->ax = -EACCES; // 拒绝访问
-            ret = 0; // 跳过原系统调用
-            // [触发时间] [触发进程(全路径)] [该进程操作对象(文件)] [该进程操作内容] [本程序处理结果]
-            HX_LOG("程序 %s 尝试访问 %s 已拒绝\n", comm, full_path);
-        }
-    }
-#endif
-
-cleanup:
-    if (allocated_full_path) {
-        kfree(allocated_full_path);
-    }
-    return ret;
-#undef PATH_STR_LEN_MAX
+    return 0;
 }
+
+/* Return handler：如果需要拒绝，就把返回值改为 -EACCES */
+static int open_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
+    struct open_data *data = (struct open_data *)ri->data;
+    if (data->deny) {
+        regs->ax = -EACCES;
+        HX_LOG("进行拦截");
+    }
+    return 0;
+}
+
+static struct kretprobe openat_kret = {
+    .handler        = open_ret,
+    .entry_handler  = open_entry,
+    .maxactive      = 20,
+    .kp.symbol_name = "do_sys_open",   // 或者 "do_sys_open"
+    .data_size      = sizeof(struct open_data),
+};
 
 static int __init kprobe_init(void) {
     int ret;
@@ -281,19 +240,16 @@ static int __init kprobe_init(void) {
         printk("err: hx_log_init");
         return -1;
     }
-    kp.pre_handler = pre_handler;
-
-    ret = register_kprobe(&kp);
+    ret = register_kretprobe(&openat_kret);
     if (ret < 0) {
         printk(KERN_ERR "register_kprobe failed, returned %d\n", ret);
         return ret;
     }
-    printk(KERN_INFO "kprobe registered for %s\n", kp.symbol_name);
     return 0;
 }
 
 static void __exit kprobe_exit(void) {
-    unregister_kprobe(&kp);
+    unregister_kretprobe(&openat_kret);
     hx_log_clone();
     printk(KERN_INFO "kprobe unregistered\n");
 }
