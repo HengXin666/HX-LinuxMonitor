@@ -2,7 +2,7 @@
 #include "../hx/hx_log.h"
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("A Simple Hello Packet Module");
+MODULE_DESCRIPTION("A hx_net Module");
 
 // 可存储 ipv4/ipv6 - 端口 的数据结构
 struct hx_addrinfo {
@@ -64,7 +64,7 @@ int hx_config_load(void) {
         printk("open log dir, err = %d\n", err);
         return -1;
     }
-    fp = filp_open("/hx/config/hx_net.config", O_RDONLY | O_CREAT, 0644);
+    fp = filp_open("/hx/config/hx_net_url.config", O_RDONLY | O_CREAT, 0644);
     if (IS_ERR(fp)) {
         int ret = PTR_ERR(fp);
         printk("open log failed, err = %d\n", ret);

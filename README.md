@@ -1,4 +1,5 @@
-# HX-LinuxMonitor
+<h1 align="center" style="color:yellow">HX-LinuxMonitor</h1>
+
 ## 一、介绍
 包含两个程序, 提供QT5界面程序以及对应的内核模块:
 
@@ -49,6 +50,13 @@
 
 > [触发时间] [触发进程(全路径)] [请求目标(网址)] [请求内容] [程序处理结果]
 ```
+
+> [!TIP]
+> 内部实现:
+>
+> `01-file 内核模块`: 是基于 `kretprobe` 来 **HOOK** `do_sys_open` 实现的.
+>
+> `02-net 内核模块`: 是基于 `Netfilter/iptables` 来 **HOOK** `NF_IP_LOCAL_OUT` 实现的.
 
 ## 二、使用
 

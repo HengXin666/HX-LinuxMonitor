@@ -272,7 +272,7 @@ static struct kretprobe openat_kret = {
     .handler        = open_ret,
     .entry_handler  = open_entry,
     .maxactive      = 20,
-    .kp.symbol_name = "do_sys_open",   // 或者 "do_sys_open"
+    .kp.symbol_name = "do_sys_open",
     .data_size      = sizeof(struct open_data),
 };
 

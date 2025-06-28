@@ -1,334 +1,321 @@
 #include <QApplication>
-#include <QMainWindow>
-#include <QVBoxLayout>
+#include <QDir>
+#include <QFile>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
-#include <QPushButton>
-#include <QTextEdit>
 #include <QListWidget>
-#include <QFile>
-#include <QDir>
+#include <QMainWindow>
 #include <QMessageBox>
 #include <QProcess>
-#include <QTimer>
-#include <QFileSystemWatcher>
-#include <QScrollBar>
-#include <QTextStream>
+#include <QPushButton>
 #include <QRegExp>
-#include <QInputDialog>
-#include <QDialog>
-#include <QDialogButtonBox>
-#include <QCloseEvent>
-#include <unistd.h>  
+#include <QScrollBar>
+#include <QTextEdit>
+#include <QTextStream>
+#include <QTimer>
+#include <QVBoxLayout>
+#include <unistd.h>
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
     MainWindow(QWidget *parent = nullptr) : QMainWindow(parent) {
-        // 检查是否以root权限运行
         if (geteuid() != 0) {
-            QMessageBox::critical(nullptr, "错误", "请使用管理员权限运行此程序！\n"
-                                           "可以使用: sudo ./程序名 或 pkexec ./程序名");
+            QMessageBox::critical(
+                nullptr, "错误",
+                "请使用管理员权限运行此程序！\n建议使用: sudo ./hx_net_gui");
             QTimer::singleShot(0, qApp, &QApplication::quit);
             return;
         }
-
         setupUI();
-        setupConnections();
-        setupLogWatcher();
         loadConfig();
-    }
-
-    ~MainWindow() {
-        // 清理资源
-        if (logWatcher) {
-            delete logWatcher;
-        }
-    }
-
-protected:
-    void closeEvent(QCloseEvent *event) override {
-        // 检查模块是否加载
-        if (isModuleLoaded()) {
-            QMessageBox::StandardButton reply;
-            reply = QMessageBox::question(this, "确认退出", 
-                "内核模块仍在运行，是否卸载模块并退出？",
-                QMessageBox::Yes | QMessageBox::No);
-            
-            if (reply == QMessageBox::Yes) {
-                unloadKernelModule(false);  // 尝试卸载但不强制
-            }
-        }
-        event->accept();
-    }
-
-private slots:
-    void addEntry() {
-        QString input = ipPortEdit->text().trimmed();
-        
-        if (!isValidInput(input)) {
-            QMessageBox::warning(this, "输入错误", "请输入有效的 IP(:端口) 格式\n例如: 1.1.1.1:123 或 1.2.3.4");
-            return;
-        }
-        
-        if (entryList->findItems(input, Qt::MatchExactly).isEmpty()) {
-            entryList->addItem(input);
-            ipPortEdit->clear();
-            saveConfig();
-        } else {
-            QMessageBox::information(this, "提示", "该条目已存在");
-        }
-    }
-    
-    void removeEntry() {
-        QList<QListWidgetItem*> selected = entryList->selectedItems();
-        if (selected.isEmpty()) {
-            QMessageBox::warning(this, "警告", "请先选择要删除的条目");
-            return;
-        }
-        
-        for (QListWidgetItem *item : selected) {
-            delete entryList->takeItem(entryList->row(item));
-        }
-        saveConfig();
-    }
-    
-    void saveConfig() {
-        // 确保配置目录存在
-        QDir configDir("/hx/config");
-        if (!configDir.exists()) {
-            if (!configDir.mkpath(".")) {
-                QMessageBox::critical(this, "错误", "无法创建配置目录");
-                return;
-            }
-        }
-        
-        // 写入配置文件
-        QFile configFile(configDir.filePath("hx_net.config"));
-        if (configFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            QTextStream out(&configFile);
-            for (int i = 0; i < entryList->count(); ++i) {
-                out << entryList->item(i)->text() << "\n";
-            }
-            configFile.close();
-            logOutput->append("配置已保存");
-        } else {
-            QMessageBox::critical(this, "错误", QString("无法写入配置文件: %1").arg(configFile.errorString()));
-        }
-    }
-    
-    void loadKernelModule() {
-        // 获取当前用户的主目录路径
-        QString configPath = "/hx/config/hx_net.config";
-        
-        QProcess process;
-        process.start("insmod", QStringList() << "hx_net.ko" << QString("config_path=%1").arg(configPath));
-        process.waitForFinished();
-        
-        if (process.exitCode() != 0) {
-            logOutput->append("加载内核模块失败: " + process.readAllStandardError());
-        } else {
-            logOutput->append("内核模块 hx_net.ko 已加载");
-            moduleLoaded = true;
-        }
-    }
-    
-    void unloadKernelModule(bool manual = true) {
-        if (!isModuleLoaded()) {
-            if (manual) {
-                QMessageBox::information(this, "提示", "模块未加载");
-            }
-            return;
-        }
-        
-        QProcess process;
-        process.start("rmmod", QStringList() << "hx_net.ko");
-        process.waitForFinished();
-        
-        if (process.exitCode() != 0) {
-            logOutput->append("卸载内核模块失败: " + process.readAllStandardError());
-        } else {
-            logOutput->append("内核模块 hx_net.ko 已卸载");
-            moduleLoaded = false;
-        }
-    }
-    
-    void checkLogChanges() {
-        // 尝试读取应用日志
-        QString logPath = "/hx/log/hx_net.log";
-        QFile appLogFile(logPath);
-        if (appLogFile.exists()) {
-            if (appLogFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                QTextStream in(&appLogFile);
-                QString newContent = in.readAll();
-                appLogFile.close();
-                
-                if (newContent != lastLogContent) {
-                    logOutput->append(newContent.mid(lastLogContent.length()));
-                    lastLogContent = newContent;
-                    
-                    // 自动滚动到底部
-                    QScrollBar *sb = logOutput->verticalScrollBar();
-                    sb->setValue(sb->maximum());
-                }
-            }
-            return;
-        }
-        
-        // 如果应用日志不存在，尝试读取内核日志
-        QProcess dmesg;
-        dmesg.start("dmesg");
-        if (dmesg.waitForFinished()) {
-            QString newContent = dmesg.readAllStandardOutput();
-            if (newContent != lastLogContent) {
-                logOutput->append(newContent.mid(lastLogContent.length()));
-                lastLogContent = newContent;
-                
-                // 自动滚动到底部
-                QScrollBar *sb = logOutput->verticalScrollBar();
-                sb->setValue(sb->maximum());
-            }
-        }
+        setupLogWatcher();
     }
 
 private:
-    QLineEdit *ipPortEdit;
-    QListWidget *entryList;
-    QPushButton *addButton;
-    QPushButton *removeButton;
-    QPushButton *loadModuleButton;
-    QPushButton *unloadModuleButton;
-    QTextEdit *logOutput;
-    QString lastLogContent;
-    QFileSystemWatcher *logWatcher;
-    bool moduleLoaded = false;
+    QLineEdit *ipEdit;
+    QLineEdit *timeEdit;
+    QListWidget *ipList;
+    QListWidget *timeList;
+    QTextEdit *logView;
+    QString lastLog;
+
+    // 时间格式校验和解析
+    static bool parseTime(QString const &timeStr, int &minutes) {
+        QRegExp rx("^(\\d{2}):(\\d{2})$");
+        if (!rx.exactMatch(timeStr)) {
+            return false;
+        }
+        int h = rx.cap(1).toInt();
+        int m = rx.cap(2).toInt();
+        if (h < 0 || h > 24 || m < 0 || m > 59) {
+            return false;
+        }
+        if (h == 24 && m != 0) {
+            return false;
+        }
+        minutes = (h == 24) ? 0 : h * 60 + m; // 关键：24:00转换成0分钟
+        return true;
+    }
+
+    static bool compareTimeRange(QString const &a, QString const &b) {
+        // 格式: HH:MM~HH:MM
+        QStringList partsA = a.split('~');
+        QStringList partsB = b.split('~');
+        int startA = 0, startB = 0;
+        parseTime(partsA[0], startA);
+        parseTime(partsB[0], startB);
+        return startA < startB;
+    }
+
+    // 检查时间段格式和合理性
+    bool validateAndMaybeSplit(QString const &input, QStringList &outSegments) {
+        QStringList segments = input.split(',', QString::SkipEmptyParts);
+        for (auto seg: segments) {
+            seg = seg.trimmed();
+            QRegExp rx("^(\\d{2}:\\d{2})~(\\d{2}:\\d{2})$");
+            if (!rx.exactMatch(seg)) {
+                QMessageBox::warning(this, "格式错误",
+                                     "时间段格式必须是 HH:MM~HH:MM");
+                return false;
+            }
+            int startMin = 0, endMin = 0;
+            if (!parseTime(rx.cap(1), startMin) ||
+                !parseTime(rx.cap(2), endMin)) {
+                QMessageBox::warning(this, "格式错误", "时间段内时间格式错误");
+                return false;
+            }
+            if (startMin == endMin) {
+                QMessageBox::warning(this, "时间错误",
+                                     "开始时间不能等于结束时间");
+                return false;
+            }
+            if (startMin > endMin) {
+                // 跨天提示拆分
+                int ret = QMessageBox::question(
+                    this, "跨天时间段",
+                    QString("时间段 %1 跨天，是否拆分为两段？\n（%2~24:00 和 "
+                            "00:00~%3）")
+                        .arg(seg)
+                        .arg(rx.cap(1))
+                        .arg(rx.cap(2)),
+                    QMessageBox::Yes | QMessageBox::No);
+                if (ret == QMessageBox::Yes) {
+                    // 起始时间如果是24:00，不拆分第一段（24:00~24:00没意义）
+                    if (rx.cap(1) == "24:00") {
+                        outSegments.append(QString("00:00~%1").arg(rx.cap(2)));
+                    } else {
+                        outSegments.append(QString("%1~24:00").arg(rx.cap(1)));
+                        outSegments.append(QString("00:00~%1").arg(rx.cap(2)));
+                    }
+                } else {
+                    return false;
+                }
+            } else {
+                seg.replace("24:00", "00:00");
+                outSegments.append(seg);
+            }
+        }
+        return true;
+    }
 
     void setupUI() {
-        QWidget *centralWidget = new QWidget(this);
-        QVBoxLayout *mainLayout = new QVBoxLayout(centralWidget);
-        
-        // 输入区域
-        QHBoxLayout *inputLayout = new QHBoxLayout();
-        inputLayout->addWidget(new QLabel("IP(:端口):"));
-        
-        ipPortEdit = new QLineEdit();
-        inputLayout->addWidget(ipPortEdit);
-        
-        addButton = new QPushButton("添加");
-        inputLayout->addWidget(addButton);
-        
-        removeButton = new QPushButton("删除");
-        inputLayout->addWidget(removeButton);
-        
-        mainLayout->addLayout(inputLayout);
-        
-        // 条目列表
-        entryList = new QListWidget();
-        entryList->setSelectionMode(QAbstractItemView::ExtendedSelection);
-        mainLayout->addWidget(entryList);
-        
-        // 模块控制按钮
-        QHBoxLayout *moduleLayout = new QHBoxLayout();
-        loadModuleButton = new QPushButton("加载内核模块");
-        unloadModuleButton = new QPushButton("卸载内核模块");
-        moduleLayout->addWidget(loadModuleButton);
-        moduleLayout->addWidget(unloadModuleButton);
-        mainLayout->addLayout(moduleLayout);
-        
-        // 日志输出区域
-        logOutput = new QTextEdit();
-        logOutput->setReadOnly(true);
-        logOutput->setWordWrapMode(QTextOption::NoWrap);
-        mainLayout->addWidget(new QLabel("日志输出:"));
-        mainLayout->addWidget(logOutput);
-        
-        setCentralWidget(centralWidget);
-        setWindowTitle("HX Net 配置工具 (管理员模式)");
+        QWidget *central = new QWidget(this);
+        QVBoxLayout *layout = new QVBoxLayout(central);
+
+        // 上班时间输入区域放顶部
+        layout->addWidget(
+            new QLabel("上班时间段 (格式: HH:MM~HH:MM, 多段用英文逗号分隔)："));
+        QHBoxLayout *timeLayout = new QHBoxLayout();
+        timeEdit = new QLineEdit();
+        QPushButton *timeAdd = new QPushButton("添加");
+        QPushButton *timeDel = new QPushButton("删除");
+        timeLayout->addWidget(timeEdit);
+        timeLayout->addWidget(timeAdd);
+        timeLayout->addWidget(timeDel);
+        timeList = new QListWidget();
+        timeList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        layout->addLayout(timeLayout);
+        layout->addWidget(timeList);
+
+        // 黑名单输入区域放下面
+        layout->addWidget(new QLabel("黑名单 IP(:端口)："));
+        QHBoxLayout *ipLayout = new QHBoxLayout();
+        ipEdit = new QLineEdit();
+        QPushButton *ipAdd = new QPushButton("添加");
+        QPushButton *ipDel = new QPushButton("删除");
+        ipLayout->addWidget(ipEdit);
+        ipLayout->addWidget(ipAdd);
+        ipLayout->addWidget(ipDel);
+        ipList = new QListWidget();
+        ipList->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        layout->addLayout(ipLayout);
+        layout->addWidget(ipList);
+
+        // 模块控制
+        QHBoxLayout *btnLayout = new QHBoxLayout();
+        QPushButton *saveBtn = new QPushButton("保存配置");
+        QPushButton *loadBtn = new QPushButton("加载模块");
+        QPushButton *unloadBtn = new QPushButton("卸载模块");
+        btnLayout->addWidget(saveBtn);
+        btnLayout->addWidget(loadBtn);
+        btnLayout->addWidget(unloadBtn);
+        layout->addLayout(btnLayout);
+
+        // 日志输出
+        logView = new QTextEdit();
+        logView->setReadOnly(true);
+        layout->addWidget(new QLabel("日志输出："));
+        layout->addWidget(logView);
+
+        setCentralWidget(central);
+        setWindowTitle("HX Net 管理工具");
         resize(800, 600);
-    }
-    
-    void setupConnections() {
-        connect(addButton, &QPushButton::clicked, this, &MainWindow::addEntry);
-        connect(removeButton, &QPushButton::clicked, this, &MainWindow::removeEntry);
-        connect(loadModuleButton, &QPushButton::clicked, this, &MainWindow::loadKernelModule);
-        connect(unloadModuleButton, &QPushButton::clicked, this, &MainWindow::unloadKernelModule);
-    }
-    
-    void setupLogWatcher() {
-        // 创建日志目录（如果不存在）
-        QDir logDir("/hx/log");
-        if (!logDir.exists()) {
-            if (!logDir.mkpath(".")) {
-                QMessageBox::critical(this, "错误", "无法创建日志目录");
+
+        // 信号槽
+        connect(timeAdd, &QPushButton::clicked, this, [=]() {
+            QString input = timeEdit->text().trimmed();
+            if (input.isEmpty()) {
                 return;
             }
-        }
-        
-        // 设置日志文件监视器
-        logWatcher = new QFileSystemWatcher(this);
-        QString logPath = logDir.filePath("hx_net.log");
-        
-        // 如果日志文件不存在，创建一个空文件
-        if (!QFile::exists(logPath)) {
-            QFile file(logPath);
-            if (!file.open(QIODevice::WriteOnly)) {
-                QMessageBox::warning(this, "警告", "无法创建日志文件");
+            QStringList segments;
+            if (!validateAndMaybeSplit(input, segments)) {
                 return;
             }
-            file.close();
-        }
-        
-        logWatcher->addPath(logPath);
-        connect(logWatcher, &QFileSystemWatcher::fileChanged, this, &MainWindow::checkLogChanges);
-        
-        // 设置定时器定期检查日志更新
-        QTimer *logTimer = new QTimer(this);
-        connect(logTimer, &QTimer::timeout, this, &MainWindow::checkLogChanges);
-        logTimer->start(1000); // 每秒检查一次
-        
-        // 初始读取日志
-        checkLogChanges();
-    }
-    
-    void loadConfig() {
-        QFile configFile("/hx/config/hx_net.config");
-        if (configFile.exists() && configFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QTextStream in(&configFile);
-            while (!in.atEnd()) {
-                QString line = in.readLine().trimmed();
-                if (!line.isEmpty() && isValidInput(line)) {
-                    entryList->addItem(line);
+
+            // 插入所有拆分后的段，且不重复
+            bool changed = false;
+            for (auto seg: segments) {
+                if (timeList->findItems(seg, Qt::MatchExactly).isEmpty()) {
+                    timeList->addItem(seg);
+                    changed = true;
                 }
             }
-            configFile.close();
-            logOutput->append("已加载配置");
+            if (changed) {
+                sortTimeList();
+            }
+            timeEdit->clear();
+        });
+        connect(timeDel, &QPushButton::clicked, this, [=]() {
+            for (auto item: timeList->selectedItems()) {
+                delete timeList->takeItem(timeList->row(item));
+            }
+        });
+
+        connect(ipAdd, &QPushButton::clicked, this, [=]() {
+            QString ip = ipEdit->text().trimmed();
+            QRegExp reg("^\\d{1,3}(\\.\\d{1,3}){3}(:\\d+)?$");
+            if (!reg.exactMatch(ip)) {
+                QMessageBox::warning(this, "输入错误",
+                                     "请输入合法 IP(:端口) 格式");
+                return;
+            }
+            if (ipList->findItems(ip, Qt::MatchExactly).isEmpty()) {
+                ipList->addItem(ip);
+                ipEdit->clear();
+            }
+        });
+        connect(ipDel, &QPushButton::clicked, this, [=]() {
+            for (auto item: ipList->selectedItems()) {
+                delete ipList->takeItem(ipList->row(item));
+            }
+        });
+
+        connect(saveBtn, &QPushButton::clicked, this, &MainWindow::saveConfig);
+        connect(loadBtn, &QPushButton::clicked, this, [=]() {
+            QProcess::execute(
+                "insmod hx_net.ko url_path=/hx/config/hx_net_url.config "
+                "time_path=/hx/config/hx_net_time.config");
+            logView->append("[操作] 模块加载命令已执行");
+        });
+        connect(unloadBtn, &QPushButton::clicked, this, [=]() {
+            QProcess::execute("rmmod hx_net.ko");
+            logView->append("[操作] 模块卸载命令已执行");
+        });
+    }
+
+    void sortTimeList() {
+        // 简单按起始时间排序
+        QList<QString> items;
+        for (int i = 0; i < timeList->count(); ++i) {
+            items.append(timeList->item(i)->text());
+        }
+        std::sort(items.begin(), items.end(), compareTimeRange);
+        timeList->clear();
+        for (auto const &it: items) {
+            timeList->addItem(it);
         }
     }
-    
-    bool isValidInput(const QString &input) {
-        // 简单的IP(:端口)格式验证
-        QRegExp ipPortRegex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}(:\\d+)?$");
-        return ipPortRegex.exactMatch(input);
+
+    void saveConfig() {
+        QDir().mkpath("/hx/config");
+        QFile f1("/hx/config/hx_net_url.config");
+        if (f1.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&f1);
+            for (int i = 0; i < ipList->count(); ++i) {
+                out << ipList->item(i)->text() << "\n";
+            }
+        }
+        QFile f2("/hx/config/hx_net_time.config");
+        if (f2.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            QTextStream out(&f2);
+            for (int i = 0; i < timeList->count(); ++i) {
+                out << timeList->item(i)->text() << "\n";
+            }
+        }
+        logView->append("[操作] 配置文件已保存");
     }
-    
-    bool isModuleLoaded() {
-        QProcess process;
-        process.start("lsmod");
-        process.waitForFinished();
-        QString output = process.readAllStandardOutput();
-        return output.contains("hx_net");
+
+    void loadConfig() {
+        QFile f1("/hx/config/hx_net_url.config");
+        if (f1.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!f1.atEnd()) {
+                QString line = f1.readLine().trimmed();
+                if (!line.isEmpty()) {
+                    ipList->addItem(line);
+                }
+            }
+        }
+        QFile f2("/hx/config/hx_net_time.config");
+        if (f2.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            while (!f2.atEnd()) {
+                QString line = f2.readLine().trimmed();
+                if (!line.isEmpty()) {
+                    timeList->addItem(line);
+                }
+            }
+            sortTimeList();
+        }
+    }
+
+    void setupLogWatcher() {
+        QTimer *t = new QTimer(this);
+        connect(t, &QTimer::timeout, this, &MainWindow::checkLog);
+        t->start(1000);
+    }
+
+    void checkLog() {
+        QFile logFile("/hx/log/hx_net.log");
+        if (logFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString content = QTextStream(&logFile).readAll();
+            if (content != lastLog) {
+                logView->append(content.mid(lastLog.length()));
+                lastLog = content;
+                logView->verticalScrollBar()->setValue(
+                    logView->verticalScrollBar()->maximum());
+            }
+        }
     }
 };
 
+#include "02_net_cli.moc"
+
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
-    
-    MainWindow mainWindow;
-    mainWindow.show();
-    
+    MainWindow w;
+    w.show();
     return app.exec();
 }
-
-#include "02_net_cli.moc"
