@@ -5,6 +5,7 @@
 #include <linux/string.h>
 #include <linux/syscalls.h>
 #include "../hx/hx_dir_tools.h"
+#include "../hx/hx_path_tools.h"
 #include "../hx/hx_log.h"
 
 MODULE_LICENSE("GPL");
@@ -197,13 +198,63 @@ static int open_entry(struct kretprobe_instance *ri, struct pt_regs *regs) {
     }
     user_path[MAX_PATH - 1] = '\0';
 
-    /* 这里可以加更复杂的白名单/黑名单判断 */
-    if (hx_str_list_contains(&hx_file_list, user_path) &&
-        !hx_str_list_contains(&hx_process_list, current->comm)) {
-        data->deny = true;
-        HX_LOG("拦截: %s %s", user_path, current->comm);
+    char* file_path = NULL;
+    char* allocated_full_path = NULL;
+    char path_pwd_str[MAX_PATH]; // 当前工作目录
+    // 处理文件的绝对路径与相对路径
+    if (user_path[0] != '/') {
+        struct path pwd;
+        get_fs_pwd(current->fs, &pwd);
+        char *cwd = d_path(&pwd, path_pwd_str, sizeof(path_pwd_str));
+        if (!IS_ERR(cwd)) {
+            allocated_full_path = kmalloc(PATH_MAX, GFP_ATOMIC);
+            if (allocated_full_path) {
+                snprintf(allocated_full_path, PATH_MAX, "%s/%s", cwd, user_path);
+                file_path = hx_simplify_path(allocated_full_path);
+            } else {
+                HX_LOG("err: %s", user_path);
+                file_path = user_path;
+                kfree(allocated_full_path);
+                allocated_full_path = NULL;
+            }
+        } else {
+            HX_LOG("err: %s", user_path);
+            file_path = user_path;
+        }
+    } else {
+        file_path = user_path;
+    }
+
+    char exe_path[MAX_PATH];
+    const char* comm = NULL;
+    // 获取可执行文件路径
+    if (current->mm && current->mm->exe_file) {
+        char* exe_path_ptr = d_path(&current->mm->exe_file->f_path, exe_path, sizeof(exe_path));
+        if (!IS_ERR(exe_path_ptr)) {
+            comm = exe_path_ptr;
+        }
+    }
+
+    // 判断是否处于白名单
+    if (hx_str_list_contains(&hx_file_list, file_path)) {
+        if (!hx_str_list_contains(&hx_process_list, comm)) {
+            data->deny = true;
+            // [触发时间] [触发进程(全路径)] [该进程操作对象(文件)] [该进程操作内容] [本程序处理结果]
+            HX_LOG("程序 %s 尝试访问 %s 已拒绝\n", comm, file_path);
+        }
+#if 0 /* 此处记录是否需要 记录打开日志 */
+        else {
+            HX_LOG("程序 %s 尝试访问 %s 已允许\n", comm, file_path);
+            data->deny = false;
+        }
+#endif
     } else {
         data->deny = false;
+    }
+
+    if (allocated_full_path) {
+        kfree(allocated_full_path);
+        kfree(file_path);
     }
     return 0;
 }
@@ -213,7 +264,6 @@ static int open_ret(struct kretprobe_instance *ri, struct pt_regs *regs) {
     struct open_data *data = (struct open_data *)ri->data;
     if (data->deny) {
         regs->ax = -EACCES;
-        HX_LOG("进行拦截");
     }
     return 0;
 }
